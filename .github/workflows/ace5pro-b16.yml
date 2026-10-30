@@ -95,6 +95,11 @@ jobs:
           sudo rm -rf /usr/local/share/boost /usr/share/swift 2>/dev/null || true
           sudo apt-get clean || true
           docker system prune -af 2>/dev/null || true
+          echo "=== installing build deps (dtc needed by kbuild, bc/zip/unzip for packaging) ==="
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq device-tree-compiler bc bison flex zip unzip libssl-dev libelf-dev || true
+          echo "--- dtc ---"
+          command -v dtc && dtc --version || echo "dtc still missing (Image can still be built)"
           echo "--- disk after cleanup ---"
           df -h / | tail -1
           FREE_G=$(df -Pk / | awk 'NR==2 {print int($4/1024/1024)}')
@@ -295,17 +300,23 @@ jobs:
               fi
               make -C $K O=$OUT gki_defconfig
               test -s "$OUT/.config" || { echo "ERROR: gki_defconfig produced empty .config"; exit 1; }
-              FRAGS="$CFGDIR/vendor/sun_perf.config"
-              # only add fragments that actually have content (sun_oplus_common.config is 0 bytes)
-              if [ -s "$CFGDIR/vendor/sun_oplus_common.config" ]; then
-                FRAGS="$FRAGS $CFGDIR/vendor/sun_oplus_common.config"
+              # absolute paths: merge_config.sh is run from inside $K, so relative
+              # paths containing the $K prefix would be doubled.
+              BASE_CFG="$OUT/.config"
+              FRAGS="$PWD/$CFGDIR/vendor/sun_perf.config"
+              if [ -s "$PWD/$CFGDIR/vendor/sun_oplus_common.config" ]; then
+                FRAGS="$FRAGS $PWD/$CFGDIR/vendor/sun_oplus_common.config"
               else
                 echo "skip empty fragment sun_oplus_common.config"
               fi
+              for frag in $FRAGS; do
+                test -f "$frag" || { echo "ERROR: fragment not found: $frag"; exit 1; }
+              done
+              echo "base: $BASE_CFG"
               echo "fragments: $FRAGS"
-              test -f "$K/scripts/kconfig/merge_config.sh" || { echo "ERROR: merge_config.sh missing in $K/scripts/kconfig"; exit 1; }
-              # usage: merge_config.sh [opts] <base config> <fragment...>  -> writes KCONFIG_CONFIG
-              ( cd "$K" && KCONFIG_CONFIG="$OUT/.config" bash scripts/kconfig/merge_config.sh -m -r -y -O "$OUT" "$OUT/.config" $FRAGS ) \
+              test -f "$PWD/$K/scripts/kconfig/merge_config.sh" || { echo "ERROR: merge_config.sh missing"; exit 1; }
+              # usage: merge_config.sh [opts] <base config> <fragment...>  -> writes to KCONFIG_CONFIG
+              ( cd "$PWD/$K" && KCONFIG_CONFIG="$BASE_CFG" bash "$PWD/$K/scripts/kconfig/merge_config.sh" -m -r -y -O "$OUT" "$BASE_CFG" $FRAGS ) \
                 || { echo "ERROR: merge_config failed"; exit 1; }
               make -C $K O=$OUT olddefconfig
               echo "--- resulting key configs ---"
