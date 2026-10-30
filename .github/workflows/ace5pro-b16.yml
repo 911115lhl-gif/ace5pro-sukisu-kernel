@@ -59,6 +59,7 @@ jobs:
       MANIFEST: oneplus_ace5_pro_b.xml
       MANIFEST_BRANCH: oneplus/sm8750
       TARGET: sun
+      BUILD_VARIANT_NAME: ${{ inputs.BUILD_VARIANT }}
       GKI_VER_EXPECT: "6.6.118-android15-8"
       BAZEL_VERSION: "7.4.1"
 
@@ -159,10 +160,11 @@ jobs:
       - name: build_kernel
         run: |
           cd workspace/kernel_platform
+          echo "TARGET=$TARGET VARIANT=$BUILD_VARIANT_NAME"
           if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
-            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT" --dry-run
+            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" --dry-run
           else
-            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT"
+            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME"
           fi
 
       - name: verify_artifact
