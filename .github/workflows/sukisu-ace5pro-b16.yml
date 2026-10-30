@@ -1,0 +1,263 @@
+# =============================================================================
+# OnePlus Ace 5 Pro (PKR110 / sun / sm8750) — SukiSU Ultra + SUSFS + KPM
+# 基于 OnePlusOSS 官方源码 oneplus_ace5_pro_b.xml (b_16.0.0 分支 = 6.6.118)
+# 与设备固件 PKR110_16.0.10.500(CN01) / Android 16 匹配
+#
+# 已核实事实（2026-10-30）：
+#  * kernel_manifest 分支 oneplus/sm8750 下存在 oneplus_ace5_pro_b.xml，
+#    其 revision 全部指向 oneplus/sm8750_b_16.0.0_oneplus_ace5_pro（6.6.118 基底）
+#  * oneplus_ace5_pro.xml（不带 _b）指向 v_15.0.0 分支，Makefile SUBLEVEL=66（6.6.66），
+#    是 Android 15 旧源码 —— 不要使用
+#  * b16 分支 build.config.common: BRANCH=android15-6.6, KMI_GENERATION=8
+#    build.config.msm.sun: MSM_ARCH=sun, VARIANTS=(consolidate perf), PAGE_SIZE=4096(4K)
+#  * 构建入口: kernel_platform/build_with_bazel.py -t sun perf（bazel 二进制位于 kernel_platform/tools/bazel）
+#  * SukiSU-Ultra 内核补丁: CONFIG_KSU / CONFIG_KPM（"Enable SukiSU KPM"）
+#  * SUSFS 补丁: ShirkNeko/susfs4ksu 分支 gki-android15-6.6（CONFIG_KSU_SUSFS）
+#  * 设备原厂内核 localversion: -abogki500782043-4k（GKI 4K 预编译），
+#    uname = 6.6.118-android15-8-g93e223c276e7-abogki500782043-4k
+#    自编译内核必须复刻该字符串，否则 vendor_dlkm 模块 vermagic 不匹配
+#
+# ⚠ 标注为“首次运行需验证”的步骤，请以实际日志为准迭代。
+# =============================================================================
+
+name: "Ace5Pro (sun/sm8750) SukiSU+SUSFS+KPM b16"
+
+on:
+  workflow_dispatch:
+    inputs:
+      CPU:
+        description: "平台（只允许 sm8750）"
+        required: true
+        default: "sm8750"
+        type: choice
+        options:
+          - sm8750
+      FEIL:
+        description: "设备/manifest 标识（只允许 oneplus_ace5_pro_b）"
+        required: true
+        default: "oneplus_ace5_pro_b"
+        type: choice
+        options:
+          - oneplus_ace5_pro_b
+      CPUD:
+        description: "设备代号（sun）"
+        required: true
+        default: "sun"
+      VARIANT:
+        description: "构建变体（perf 匹配原厂）"
+        required: true
+        default: "perf"
+        type: choice
+        options:
+          - perf
+      ENABLE_KPM:
+        description: "开启 KPM"
+        required: true
+        default: true
+        type: boolean
+      ENABLE_SUSFS:
+        description: "开启 SUSFS"
+        required: true
+        default: true
+        type: boolean
+      LOCALVERSION:
+        description: "CONFIG_LOCALVERSION（默认复刻原厂，勿改）"
+        required: true
+        default: "-g93e223c276e7-abogki500782043-4k"
+      DRY_RUN:
+        description: "首次验证模式：只跑 bazel 分析不产出（true 时跳过产物/打包步骤）"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      MANIFEST: oneplus_ace5_pro_b.xml
+      MANIFEST_BRANCH: oneplus/sm8750
+      TARGET: sun
+      GKI_VER_EXPECT: "6.6.118-android15-8"
+      # kleaf(android15-6.6) 所需 bazel 版本；首次运行若报版本错误，只改这一行
+      BAZEL_VERSION: "7.4.1"
+
+    steps:
+      # ------------------------------------------------------------------
+      # 0) 参数守卫：不满足条件的运行直接失败（符合“不要运行旧参数”要求）
+      # ------------------------------------------------------------------
+      - name: 参数守卫
+        run: |
+          set -e
+          [ "${{ inputs.CPU }}" = "sm8750" ] || { echo "ERROR: CPU 必须是 sm8750"; exit 1; }
+          [ "${{ inputs.FEIL }}" = "oneplus_ace5_pro_b" ] || { echo "ERROR: FEIL 必须是 oneplus_ace5_pro_b（_b = 6.6.118）"; exit 1; }
+          [ "${{ inputs.CPUD }}" = "sun" ] || { echo "ERROR: CPUD 必须是 sun"; exit 1; }
+          [ "${{ inputs.VARIANT }}" = "perf" ] || { echo "ERROR: VARIANT 必须是 perf"; exit 1; }
+          echo "本次运行 commit: ${GITHUB_SHA}"
+          echo "SHORT_SHA=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+          echo "工作流参数校验通过（sm8750 / oneplus_ace5_pro_b / sun / perf）"
+
+      # ------------------------------------------------------------------
+      # 1) 依赖：repo 工具
+      # ------------------------------------------------------------------
+      - name: 安装 repo 工具
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      # ------------------------------------------------------------------
+      # 2) 拉取 OnePlusOSS 官方源码（b16 manifest）
+      # ------------------------------------------------------------------
+      - name: repo init + sync（oneplus_ace5_pro_b.xml）
+        run: |
+          mkdir -p workspace && cd workspace
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+                    -b "$MANIFEST_BRANCH" -m "$MANIFEST" --depth=1
+          # codelinaro 预编译仓库较大且网络不稳，自动重试 3 次
+          for i in 1 2 3; do
+            echo "== repo sync 第 $i 次 =="
+            repo sync -c -j"$(nproc)" --fail-fast && break
+            echo "== repo sync 失败，5 秒后重试 =="
+            sleep 5
+            [ "$i" = "3" ] && exit 1
+          done
+          echo "common  Makefile: $(sed -n '2,4p' kernel_platform/common/Makefile | tr '\n' ' ')"
+          echo "msm-kernel Makefile: $(sed -n '2,4p' kernel_platform/msm-kernel/Makefile | tr '\n' ' ')"
+          # 断言：必须为 6.6.118（b16），否则终止
+          grep -q "SUBLEVEL = 118" kernel_platform/common/Makefile || { echo "ERROR: 源码不是 6.6.118"; exit 1; }
+          grep -q "SUBLEVEL = 118" kernel_platform/msm-kernel/Makefile || { echo "ERROR: 源码不是 6.6.118"; exit 1; }
+
+      # ------------------------------------------------------------------
+      # 3) 放置 bazel 二进制（⚠ 版本需首次运行验证；kleaf android15-6.6 用 bazel 7.4.x）
+      # ------------------------------------------------------------------
+      - name: 放置 bazel
+        run: |
+          curl -fsSL -o /tmp/bazel "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64"
+          chmod +x /tmp/bazel
+          mkdir -p workspace/kernel_platform/tools
+          cp /tmp/bazel workspace/kernel_platform/tools/bazel
+
+      # ------------------------------------------------------------------
+      # 4) 应用 SukiSU-Ultra 内核补丁（KSU + KPM）
+      #    ⚠ setup.sh 的精确行为需首次运行验证（官方安装方式）
+      # ------------------------------------------------------------------
+      - name: 应用 SukiSU-Ultra（KSU + KPM）
+        run: |
+          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu
+          cd workspace/kernel_platform/msm-kernel
+          # 官方安装脚本；如失败请参照 SukiSU-Ultra 仓库 README/docs 手动集成 kernel/ 目录
+          bash /tmp/sukisu/kernel/setup.sh || { echo "ERROR: SukiSU setup.sh 失败，检查日志"; exit 1; }
+          # 集成自检：SukiSU 驱动（含 allowlist.c）必须已进入内核树
+          find . -name 'allowlist.c' | grep -q . || { echo "ERROR: 未找到 allowlist.c，SukiSU 内核驱动未集成"; exit 1; }
+          find . -name 'allowlist.c'
+
+      # ------------------------------------------------------------------
+      # 5) 应用 SUSFS 补丁（gki-android15-6.6，适配 6.6 / KMI 8）
+      # ------------------------------------------------------------------
+      - name: 应用 SUSFS（gki-android15-6.6）
+        if: inputs.ENABLE_SUSFS
+        run: |
+          git clone --depth=1 -b gki-android15-6.6 https://github.com/ShirkNeko/susfs4ksu.git /tmp/susfs
+          cd workspace/kernel_platform/msm-kernel
+          for p in /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-*.patch \
+                   /tmp/susfs/kernel_patches/sus_su-*.patch \
+                   /tmp/susfs/kernel_patches/*.patch; do
+            [ -f "$p" ] || continue
+            git apply --3way "$p" || { echo "ERROR: SUSFS 补丁应用失败: $p"; exit 1; }
+          done
+          if git status --porcelain | grep -q '\.rej'; then
+            echo "ERROR: 存在 .rej 冲突文件（SUSFS 补丁与 6.6.118 源码不匹配）"; exit 1;
+          fi
+          echo "SUSFS 补丁应用成功"
+
+      # ------------------------------------------------------------------
+      # 6) 写入内核配置（追加到 sun_perf.config 片段）
+      # ------------------------------------------------------------------
+      - name: 写入内核配置
+        run: |
+          cd workspace/kernel_platform/msm-kernel
+          CFG=arch/arm64/configs/vendor/sun_perf.config
+          cat >> "$CFG" <<EOF
+
+# ---- SukiSU / SUSFS / KPM（本 workflow 注入）----
+CONFIG_KSU=y
+CONFIG_KPM=y
+CONFIG_KSU_SUSFS=y
+CONFIG_KALLSYMS_ALL=y
+# 复刻原厂 localversion，保证 vendor_dlkm 模块 vermagic 匹配（勿改）
+CONFIG_LOCALVERSION_AUTO=n
+CONFIG_LOCALVERSION="${{ inputs.LOCALVERSION }}"
+# 若编译报 allowlist.c implicit-fallthrough 错误（历史问题），取消下面一行注释：
+# CONFIG_WERROR=n
+EOF
+          grep -E "CONFIG_KSU=|CONFIG_KPM=|CONFIG_KSU_SUSFS=|CONFIG_LOCALVERSION" "$CFG"
+
+      # ------------------------------------------------------------------
+      # 7) 构建（bazel, -t sun perf）
+      # ------------------------------------------------------------------
+      - name: 构建内核（-t sun perf）
+        run: |
+          cd workspace/kernel_platform
+          if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
+            python3 build_with_bazel.py -t "$TARGET" "$VARIANT" --dry-run
+          else
+            python3 build_with_bazel.py -t "$TARGET" "$VARIANT"
+          fi
+
+      # ------------------------------------------------------------------
+      # 8) 产物自检（不只是“编译成功”）
+      # ------------------------------------------------------------------
+      - name: 产物自检
+        if: ${{ !inputs.DRY_RUN }}
+        run: |
+          cd workspace/kernel_platform
+          IMG=$(find out -type f -name Image | head -1)
+          echo "Image: $IMG"
+          test -n "$IMG" && test -s "$IMG" || { echo "ERROR: Image 不存在或为空"; exit 1; }
+          # 内核版本字符串断言
+          grep -a -o "Linux version [^ ]*" "$IMG" | head -1
+          grep -a "Linux version" "$IMG" | grep -q "${{ env.GKI_VER_EXPECT }}" \
+            || { echo "ERROR: 内核版本不等于 ${{ env.GKI_VER_EXPECT }}"; exit 1; }
+          # localversion 断言
+          grep -a "Linux version" "$IMG" | grep -q "abogki500782043-4k" \
+            || { echo "ERROR: localversion 与原厂不一致"; exit 1; }
+          # 功能断言：.config 必须含三项
+          CFG=$(find out -type f -name .config | head -1)
+          echo "config: $CFG"
+          grep -qE "^CONFIG_KSU=y" "$CFG" || { echo "ERROR: CONFIG_KSU 未启用"; exit 1; }
+          grep -qE "^CONFIG_KPM=y" "$CFG" || { echo "ERROR: CONFIG_KPM 未启用"; exit 1; }
+          grep -qE "^CONFIG_KSU_SUSFS=y" "$CFG" || { echo "ERROR: CONFIG_KSU_SUSFS 未启用"; exit 1; }
+          # 架构与页大小断言
+          grep -qE "^CONFIG_ARM64=y" "$CFG" || { echo "ERROR: 非 arm64"; exit 1; }
+          grep -qE "^CONFIG_ARM64_4K_PAGES=y" "$CFG" || { echo "ERROR: 非 4K 页大小"; exit 1; }
+          echo "=== 产物自检全部通过 ==="
+
+      # ------------------------------------------------------------------
+      # 9) AK3 打包（只刷 boot；本机 DT 在 vendor_boot/dtbo，AK3 不带 dtb）
+      # ------------------------------------------------------------------
+      - name: AK3 打包
+        if: ${{ !inputs.DRY_RUN }}
+        run: |
+          cd workspace/kernel_platform
+          IMG=$(find out -type f -name Image | head -1)
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/ak3
+          cp "$IMG" /tmp/ak3/Image
+          # anykernel.sh 关键项（在 /tmp/ak3/anykernel.sh 中确保存在）：
+          #   is_slot_device=1;
+          #   block=/dev/block/bootdevice/by-name/boot;   # 或 block=auto
+          #   # 不要写入 dtb/dtb_image/ramdisk 等字段
+          sed -i 's/^is_slot_device=.*/is_slot_device=1;/' /tmp/ak3/anykernel.sh
+          sed -i 's|^block=.*|block=auto;|' /tmp/ak3/anykernel.sh
+          cd /tmp/ak3
+          ZIP="AnyKernel3-sun-sm8750-b16-SukiSU-SUSFS-KPM-${SHORT_SHA}.zip"
+          zip -r9 "$ZIP" . -x '.git/*'
+          mkdir -p /tmp/artifact && cp "$ZIP" /tmp/artifact/
+          unzip -l "/tmp/artifact/$ZIP" | head -30
+
+      - name: 上传产物
+        if: ${{ !inputs.DRY_RUN }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ace5pro-sun-b16-SukiSU-SUSFS-KPM-${{ env.SHORT_SHA }}
+          path: /tmp/artifact/*.zip
