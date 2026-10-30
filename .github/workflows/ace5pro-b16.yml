@@ -212,6 +212,37 @@ jobs:
             echo "inserted apple_support bazel_dep after module()"
           fi
           head -24 "$MODFILE"
+          echo "=== what does kleaf expect in tools/ (bazel wrapper location) ==="
+          ls -la tools/ 2>/dev/null | head -20
+          echo "--- tools/bazel (we put a plain release binary here) ---"
+          file tools/bazel 2>/dev/null || true
+          echo "--- does the tree ship its own bazel wrapper? ---"
+          find . -maxdepth 4 -name 'bazel*' -not -path './bazel-cache/*' -not -path './out/*' 2>/dev/null | head -20
+          echo "--- prebuilts/build-tools present? ---"
+          ls -d prebuilts/build-tools prebuilts/kernel-build-tools 2>/dev/null || echo "none"
+          echo "=== patch rules_python reexports.bzl: bazel 8 removed native PyInfo ==="
+          RP=$(find bazel-cache -path '*rules_python*/python/private/reexports.bzl' 2>/dev/null | head -1)
+          if [ -z "$RP" ]; then
+            RP="external/bazelbuild-rules_python/python/private/reexports.bzl"
+          fi
+          echo "target: $RP"
+          if [ -f "$RP" ]; then
+            echo "--- original lines 40-50 ---"
+            sed -n '40,50p' "$RP"
+            if ! grep -q 'ACE5PRO_PYINFO_SHIM' "$RP"; then
+              # Replace direct builtin usage with a guarded fallback.
+              sed -i 's|^internal_PyInfo = PyInfo$|internal_PyInfo = PyInfo if "PyInfo" in dir() else provider(fields = {})  # ACE5PRO_PYINFO_SHIM|' "$RP"
+              sed -i 's|^internal_PyRuntimeInfo = PyRuntimeInfo$|internal_PyRuntimeInfo = PyRuntimeInfo if "PyRuntimeInfo" in dir() else provider(fields = {})  # ACE5PRO_PYINFO_SHIM|' "$RP"
+              echo "--- patched lines ---"
+              sed -n '40,50p' "$RP"
+            else
+              echo "already patched"
+            fi
+          else
+            echo "NOT FOUND: $RP"
+            find bazel-cache -name 'reexports.bzl' 2>/dev/null | head -5
+            find external -name 'reexports.bzl' 2>/dev/null | head -5
+          fi
           echo "--- .bazelrc (bzlmod mode) ---"
           echo 'common --enable_bzlmod' > .bazelrc
           echo "common --enable_bzlmod" > user.bazelrc
