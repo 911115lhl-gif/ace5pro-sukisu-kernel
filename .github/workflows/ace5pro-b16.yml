@@ -194,32 +194,24 @@ jobs:
           echo "--- symlink target ---"
           ls -l MODULE.bazel
           echo "=== bazel 8.1.1 + bzlmod ==="
-          # 1) bazel 8 requires bazel_dep for every local_path_override target.
-          #    Insert right after module() (which must stay the first call).
+          # Only apple_support genuinely lacks a bazel_dep. Do NOT add bazel_dep for
+          # rules_java/rules_python etc: that would pull the upstream version and
+          # bypass the in-tree copy that local_path_override points to.
           if ! grep -q 'ACE5PRO_PATCHED' "$MODFILE"; then
             awk '
               { print }
               /^\)$/ && !done && seen_module {
                 print ""
                 print "bazel_dep(name = \"apple_support\", version = \"1.0.0\")  # ACE5PRO_PATCHED"
-                print "bazel_dep(name = \"rules_java\", version = \"7.12.2\")  # ACE5PRO_PATCHED"
                 print ""
                 done = 1
               }
               /^module\($/ { seen_module = 1 }
             ' "$MODFILE" > /tmp/module.new
             mv /tmp/module.new "$MODFILE"
-            echo "inserted bazel_dep after module()"
+            echo "inserted apple_support bazel_dep after module()"
           fi
           head -24 "$MODFILE"
-          echo "--- reexports.bzl PyInfo usage (rule out guesswork) ---"
-          RP="external/bazelbuild-rules_python/python/private/reexports.bzl"
-          if [ -f "$RP" ]; then
-            sed -n '30,60p' "$RP"
-          else
-            echo "not found at $RP"
-            find external/bazelbuild-rules_python -name 'reexports.bzl' | head -5
-          fi
           echo "--- .bazelrc (bzlmod mode) ---"
           echo 'common --enable_bzlmod' > .bazelrc
           echo "common --enable_bzlmod" > user.bazelrc
