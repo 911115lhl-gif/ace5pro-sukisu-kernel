@@ -21,7 +21,7 @@ on:
         description: "device codename (sun)"
         required: true
         default: "sun"
-      VARIANT:
+      BUILD_VARIANT:
         description: "build variant (perf matches stock)"
         required: true
         default: "perf"
@@ -69,7 +69,7 @@ jobs:
           [ "${{ inputs.CPU }}" = "sm8750" ] || { echo "ERROR: CPU must be sm8750"; exit 1; }
           [ "${{ inputs.FEIL }}" = "oneplus_ace5_pro_b" ] || { echo "ERROR: FEIL must be oneplus_ace5_pro_b"; exit 1; }
           [ "${{ inputs.CPUD }}" = "sun" ] || { echo "ERROR: CPUD must be sun"; exit 1; }
-          [ "${{ inputs.VARIANT }}" = "perf" ] || { echo "ERROR: VARIANT must be perf"; exit 1; }
+          [ "${{ inputs.BUILD_VARIANT }}" = "perf" ] || { echo "ERROR: BUILD_VARIANT must be perf"; exit 1; }
           echo "commit=${GITHUB_SHA}"
           echo "SHORT_SHA=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
           echo "guard ok"
@@ -160,9 +160,9 @@ jobs:
         run: |
           cd workspace/kernel_platform
           if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
-            python3 build_with_bazel.py -t "$TARGET" "$VARIANT" --dry-run
+            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT" --dry-run
           else
-            python3 build_with_bazel.py -t "$TARGET" "$VARIANT"
+            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT"
           fi
 
       - name: verify_artifact
