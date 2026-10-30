@@ -716,87 +716,89 @@ jobs:
       - name: build_boot_img
         if: ${{ !inputs.DRY_RUN }}
         run: |
-          # Build a ready-to-flash boot.img by patching a stock v4 header template,
-          # so flashing does not depend on AK3/magiskboot repacking at all.
+          # Build a ready-to-flash boot.img by writing a stock-shaped Android boot
+          # header v4 in front of the kernel, so flashing does not depend on
+          # AK3/magiskboot repacking at all.
           #
           # Stock boot_a.img layout (verified against the user's own dump):
           #   0x0000..0x062F  header v4 (header_size = 1584)
           #   0x0630..0x0FFF  zero padding
-          #   0x1000..        kernel Image, then zero fill up to the 96MB partition
-          # os_version is 0x00000000 and signature_size is 0, i.e. no AVB payload,
-          # so the only field that has to change is kernel_size at 0x08.
+          #   0x1000..        kernel Image, then zero fill to the 96MB partition
+          # os_version is 0x00000000 and signature_size is 0 (no AVB payload), so the
+          # installed header differs from stock in exactly one field: kernel_size.
           cd workspace/kernel_platform
           IMG=$(find . -type f -name Image -path '*arch/arm64/boot/Image' 2>/dev/null | head -1)
           test -n "$IMG" && test -s "$IMG" || { echo "ERROR: Image missing"; exit 1; }
           echo "kernel: $IMG ($(stat -c%s "$IMG") bytes)"
-          outdir=/tmp/artifact
-          mkdir -p "$outdir"
-          python3 - "$IMG" "$outdir/boot_sun_sukisu_susfs_kpm.img" <<'PYEOF'
-import struct, sys
+          mkdir -p /tmp/artifact
+          BOOTIMG=/tmp/artifact/boot_sun_sukisu_susfs_kpm.img
 
-src, dst = sys.argv[1], sys.argv[2]
-kernel = open(src, 'rb').read()
-
-# arm64 Image header sanity: magic "ARM\x64" at 0x38
-magic = struct.unpack_from('<I', kernel, 0x38)[0]
-assert magic == 0x644D5241, 'not a raw arm64 Image (magic 0x%08X)' % magic
-
-# Android boot header v4, 1584 bytes, then zero padding to 0x1000
-HEADER_SIZE = 1584
-PAGE = 4096
-hdr = bytearray(HEADER_SIZE)
-hdr[0:8] = b'ANDROID!'
-struct.pack_into('<I', hdr, 0x08, len(kernel))   # kernel_size
-struct.pack_into('<I', hdr, 0x0C, 0)             # ramdisk_size (none: ramdisk is in init_boot)
-struct.pack_into('<I', hdr, 0x10, 0)             # os_version  (stock is 0)
-struct.pack_into('<I', hdr, 0x14, HEADER_SIZE)   # header_size
-struct.pack_into('<I', hdr, 0x28, 4)             # header_version
-# signature_size lives at 0x2C + 1536 in v4 and must be 0 (stock has no AVB payload)
-struct.pack_into('<I', hdr, 0x2C + 1536, 0)
-
-with open(dst, 'wb') as f:
-    f.write(hdr)
-    f.write(b'\0' * (PAGE - HEADER_SIZE))
-    f.write(kernel)
-
-print('wrote %s (%d bytes)' % (dst, PAGE + len(kernel)))
-PYEOF
-          BOOTIMG="$outdir/boot_sun_sukisu_susfs_kpm.img"
+          # written to a file first; heredocs inside a YAML run: block are fragile
+          cat > /tmp/mkboot.py <<'PYEOF'
+          import struct, sys
+          src, dst = sys.argv[1], sys.argv[2]
+          kernel = open(src, 'rb').read()
+          magic = struct.unpack_from('<I', kernel, 0x38)[0]
+          assert magic == 0x644D5241, 'not a raw arm64 Image (magic 0x%08X)' % magic
+          HEADER_SIZE = 1584
+          PAGE = 4096
+          hdr = bytearray(HEADER_SIZE)
+          hdr[0:8] = b'ANDROID!'
+          struct.pack_into('<I', hdr, 0x08, len(kernel))   # kernel_size
+          struct.pack_into('<I', hdr, 0x0C, 0)             # ramdisk_size
+          struct.pack_into('<I', hdr, 0x10, 0)             # os_version (stock is 0)
+          struct.pack_into('<I', hdr, 0x14, HEADER_SIZE)   # header_size
+          struct.pack_into('<I', hdr, 0x28, 4)             # header_version
+          struct.pack_into('<I', hdr, 0x2C + 1536, 0)      # signature_size
+          with open(dst, 'wb') as f:
+              f.write(hdr)
+              f.write(b'\0' * (PAGE - HEADER_SIZE))
+              f.write(kernel)
+          print('wrote %s (%d bytes)' % (dst, PAGE + len(kernel)))
+          PYEOF
+          python3 /tmp/mkboot.py "$IMG" "$BOOTIMG" || { echo "ERROR: mkboot failed"; exit 1; }
           test -s "$BOOTIMG" || { echo "ERROR: boot.img not produced"; exit 1; }
+
+          cat > /tmp/chkboot.py <<'PYEOF'
+          import struct, sys
+          b = open(sys.argv[1], 'rb').read()
+          assert b[0:8] == b'ANDROID!', 'bad magic'
+          ks = struct.unpack_from('<I', b, 0x08)[0]
+          rs = struct.unpack_from('<I', b, 0x0C)[0]
+          hs = struct.unpack_from('<I', b, 0x14)[0]
+          hv = struct.unpack_from('<I', b, 0x28)[0]
+          sig = struct.unpack_from('<I', b, 0x2C + 1536)[0]
+          print('  magic         : ANDROID!')
+          print('  kernel_size   : %d' % ks)
+          print('  ramdisk_size  : %d' % rs)
+          print('  header_size   : %d' % hs)
+          print('  header_version: %d' % hv)
+          print('  signature_size: %d' % sig)
+          assert hv == 4, 'header_version must be 4'
+          assert hs == 1584, 'header_size must be 1584'
+          assert rs == 0 and sig == 0, 'ramdisk/signature must be empty'
+          assert len(b) == 4096 + ks, 'file size must be header page + kernel'
+          kmagic = struct.unpack_from('<I', b, 4096 + 0x38)[0]
+          assert kmagic == 0x644D5241, 'kernel magic wrong'
+          print('  kernel magic  : 0x%08X (ARM64)' % kmagic)
+          i = b.find(b'Linux version ', 4096, 4096 + 200000)
+          rel = b[i:i+130].split(b'\0')[0].decode('latin1') if i > 0 else '(not found)'
+          print('  release       : %s' % rel)
+          assert b'runner@' in rel or b'runner' in rel, 'boot.img does not carry our build'
+          print('  OK: boot.img matches the stock v4 layout and carries our kernel')
+          PYEOF
           echo "--- boot.img header check ---"
-          python3 - "$BOOTIMG" <<'PYEOF'
-import struct, sys
-b = open(sys.argv[1], 'rb').read()
-assert b[0:8] == b'ANDROID!', 'bad magic'
-ks = struct.unpack_from('<I', b, 0x08)[0]
-rs = struct.unpack_from('<I', b, 0x0C)[0]
-hs = struct.unpack_from('<I', b, 0x14)[0]
-hv = struct.unpack_from('<I', b, 0x28)[0]
-sig = struct.unpack_from('<I', b, 0x2C + 1536)[0]
-print('  magic         : ANDROID!')
-print('  kernel_size   : %d' % ks)
-print('  ramdisk_size  : %d' % rs)
-print('  header_size   : %d' % hs)
-print('  header_version: %d' % hv)
-print('  signature_size: %d' % sig)
-assert hv == 4, 'header_version must be 4'
-assert hs == 1584, 'header_size must be 1584'
-assert rs == 0 and sig == 0, 'ramdisk/signature must be empty'
-assert len(b) == 4096 + ks, 'file size must be header page + kernel'
-kmagic = struct.unpack_from('<I', b, 4096 + 0x38)[0]
-assert kmagic == 0x644D5241, 'kernel magic wrong'
-print('  kernel magic  : 0x%08X (ARM64)' % kmagic)
-rel = b[4096:4096+4000].split(b'\0', 1)[0]
-i = b.find(b'Linux version ', 4096, 4096 + 200000)
-print('  release       : %s' % b[i:i+120].split(b'\0')[0].decode('latin1'))
-print('  OK: boot.img matches the stock v4 layout')
-PYEOF
+          python3 /tmp/chkboot.py "$BOOTIMG" || { echo "ERROR: boot.img verification failed"; exit 1; }
           echo "--- artifacts ---"
-          ls -l "$outdir"
+          ls -l /tmp/artifact
 
       - name: upload_artifact
         if: ${{ !inputs.DRY_RUN }}
         uses: actions/upload-artifact@v4
         with:
           name: ace5pro-sun-b16-SukiSU-SUSFS-KPM-${{ env.SHORT_SHA }}
-          path: /tmp/artifact/*.zip
+          # both deliverables: the AK3 package and the ready-to-flash boot.img
+          path: |
+            /tmp/artifact/*.zip
+            /tmp/artifact/*.img
+          if-no-files-found: error
