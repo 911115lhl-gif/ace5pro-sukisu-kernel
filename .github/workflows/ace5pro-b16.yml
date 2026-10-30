@@ -223,7 +223,7 @@ jobs:
           echo "--- appended config ---"
           tail -14 "$CFG"
 
-      - name: strip_dirty_suffix
+      - name: check_release_string_logic
         run: |
           # Root cause of the trailing "+": scripts/setlocalversion ends with
           #
@@ -382,15 +382,31 @@ jobs:
                 ls -la $K/KernelSU 2>/dev/null || echo "no $K/KernelSU dir"
                 exit 1
               fi
-              # EXTRAVERSION gives -android15-8; CONFIG_LOCALVERSION (in .config) gives
-              # the g...-abogki... suffix; CONFIG_LOCALVERSION_AUTO=n stops setlocalversion
-              # LOCALVERSION="" must be passed explicitly: setlocalversion emits '+'
-              # only when LOCALVERSION is unset in the environment.
               # Release string target:
               #   VERSION.PATCHLEVEL.SUBLEVEL + EXTRAVERSION + CONFIG_LOCALVERSION
               #   = 6.6.118 + -android15-8 + -g93e223c276e7-abogki500782043-4k
-              echo "--- pre-build sanity: what will the release string be? ---"
+              # setlocalversion appends '+' ONLY when LOCALVERSION is unset, so export
+              # it as an explicit empty string for both the make invocation and any
+              # child shell that runs scripts/setlocalversion.
+              export LOCALVERSION=
+              echo "--- pre-build sanity ---"
+              echo "LOCALVERSION is set to: '${LOCALVERSION}'"
               grep -E "^CONFIG_LOCALVERSION" "$OUT/.config" || true
+              echo "--- predicted release string (make kernelrelease) ---"
+              REL=$(make -C $K O=$OUT EXTRAVERSION=-android15-8 LOCALVERSION= kernelrelease 2>/dev/null | tail -1)
+              echo "release = '$REL'"
+              if [ -z "$REL" ]; then
+                echo "ERROR: make kernelrelease returned nothing"
+                exit 1
+              fi
+              case "$REL" in
+                *+) echo "ERROR: predicted release still ends with '+'"; exit 1 ;;
+              esac
+              if ! echo "$REL" | grep -q "abogki500782043-4k"; then
+                echo "ERROR: predicted release lacks the stock suffix"
+                exit 1
+              fi
+              echo "predicted release OK"
               make -C $K O=$OUT -j"$(nproc)" EXTRAVERSION=-android15-8 LOCALVERSION= Image
               if [ -f "$OUT/arch/arm64/boot/Image" ]; then
                 echo "manual build OK: $OUT/arch/arm64/boot/Image"
