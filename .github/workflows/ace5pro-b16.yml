@@ -161,10 +161,22 @@ jobs:
         run: |
           cd workspace/kernel_platform
           echo "TARGET=$TARGET VARIANT=$BUILD_VARIANT_NAME"
-          # kleaf is WORKSPACE-mode; disable bzlmod globally via a user bazelrc
-          printf 'common --noenable_bzlmod\n' > user.bazelrc
-          echo "--- user.bazelrc ---"
-          cat user.bazelrc
+          echo "=== check external modules needed by kleaf MODULE.bazel ==="
+          for m in bazelbuild-apple_support bazel-skylib bazelbuild-platforms bazelbuild-rules_cc bazelbuild-rules_java bazelbuild-rules_license bazelbuild-rules_pkg bazelbuild-rules_python python/absl-py; do
+            if [ -f "external/$m/MODULE.bazel" ]; then
+              echo "OK   external/$m"
+            elif [ -d "external/$m" ]; then
+              echo "DIR  external/$m (no MODULE.bazel, files: $(ls external/$m | head -5 | tr '\n' ' '))"
+            else
+              echo "MISS external/$m"
+            fi
+          done
+          echo "=== all external dirs ==="
+          ls external/ 2>/dev/null | head -40
+          echo "=== kleaf uses WORKSPACE mode, disable bzlmod everywhere ==="
+          printf 'common --noenable_bzlmod\nbuild --noenable_bzlmod\nquery --noenable_bzlmod\n' > .bazelrc
+          printf 'common --noenable_bzlmod\nbuild --noenable_bzlmod\nquery --noenable_bzlmod\n' > user.bazelrc
+          echo "--- .bazelrc ---"; cat .bazelrc
           export BAZEL_ARGS="--noenable_bzlmod"
           if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
             python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" --dry-run $BAZEL_ARGS
