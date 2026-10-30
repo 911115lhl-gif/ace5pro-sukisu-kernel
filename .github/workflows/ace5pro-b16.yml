@@ -98,28 +98,17 @@ jobs:
           grep -q "SUBLEVEL = 118" kernel_platform/msm-kernel/Makefile || { echo "ERROR: msm-kernel not 6.6.118"; exit 1; }
           echo "source is 6.6.118 ok"
 
-      - name: install_bazel
+      - name: check_toolchain
         run: |
-          curl -fsSL -o /tmp/bazel "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64"
-          chmod +x /tmp/bazel
-          mkdir -p workspace/kernel_platform/tools
-          cp /tmp/bazel workspace/kernel_platform/tools/bazel
-          echo "=== bazel version ==="
-          /tmp/bazel --version
-          echo "=== kleaf expected bazel version (if declared) ==="
           cd workspace/kernel_platform
-          # kleaf declares its supported bazel version; dump every place that could hold it
-          for f in build/kernel/kleaf/impl/bazel_version.bzl \
-                   build/kernel/kleaf/constants.bzl \
-                   build/kernel/kleaf/bazel.WORKSPACE \
-                   .bazelversion build/kernel/kleaf/.bazelversion; do
-            if [ -f "$f" ]; then
-              echo "--- $f ---"
-              grep -inE 'bazel|version|[0-9]+\.[0-9]+' "$f" | head -20
-            fi
-          done
-          echo "=== MODULE.bazel symlink target ==="
-          ls -l MODULE.bazel 2>/dev/null || echo "no MODULE.bazel"
+          echo "=== clang prebuilts (needed by legacy make path) ==="
+          ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null || echo "no clang prebuilt dir"
+          echo "=== build tools present? ==="
+          ls -d prebuilts/build-tools prebuilts/kernel-build-tools 2>/dev/null || echo "none"
+          echo "=== host toolchain ==="
+          gcc --version | head -1 || true
+          make --version | head -1 || true
+          python3 --version || true
 
       - name: apply_sukisu
         run: |
@@ -177,95 +166,100 @@ jobs:
         run: |
           cd workspace/kernel_platform
           echo "TARGET=$TARGET VARIANT=$BUILD_VARIANT_NAME"
-          echo "=== check external modules needed by kleaf MODULE.bazel ==="
-          for m in bazelbuild-apple_support bazel-skylib bazelbuild-platforms bazelbuild-rules_cc bazelbuild-rules_java bazelbuild-rules_license bazelbuild-rules_pkg bazelbuild-rules_python python/absl-py; do
-            if [ -f "external/$m/MODULE.bazel" ]; then
-              echo "OK   external/$m"
-            elif [ -d "external/$m" ]; then
-              echo "DIR  external/$m (no MODULE.bazel, files: $(ls external/$m | head -5 | tr '\n' ' '))"
-            else
-              echo "MISS external/$m"
-            fi
+          echo "=== legacy (non-bazel) build path ==="
+          echo "--- build dirs ---"
+          ls -la build/ 2>/dev/null | head -30 || echo "no build/"
+          echo "--- candidate entry points ---"
+          for f in build/build.sh build.sh common/build/build.sh msm-kernel/build/build.sh; do
+            if [ -f "$f" ]; then echo "FOUND  $f"; else echo "absent $f"; fi
           done
-          echo "=== all external dirs ==="
-          ls external/ 2>/dev/null | head -40
-          echo "=== kleaf uses bzlmod (MODULE.bazel is a symlink to bzlmod/bazel.MODULE.bazel) ==="
-          MODFILE="build/kernel/kleaf/bzlmod/bazel.MODULE.bazel"
-          echo "--- symlink target ---"
-          ls -l MODULE.bazel
-          echo "=== bazel 8.1.1 + bzlmod ==="
-          # Only apple_support genuinely lacks a bazel_dep. Do NOT add bazel_dep for
-          # rules_java/rules_python etc: that would pull the upstream version and
-          # bypass the in-tree copy that local_path_override points to.
-          if ! grep -q 'ACE5PRO_PATCHED' "$MODFILE"; then
-            awk '
-              { print }
-              /^\)$/ && !done && seen_module {
-                print ""
-                print "bazel_dep(name = \"apple_support\", version = \"1.0.0\")  # ACE5PRO_PATCHED"
-                print ""
-                done = 1
-              }
-              /^module\($/ { seen_module = 1 }
-            ' "$MODFILE" > /tmp/module.new
-            mv /tmp/module.new "$MODFILE"
-            echo "inserted apple_support bazel_dep after module()"
-          fi
-          head -24 "$MODFILE"
-          echo "=== what does kleaf expect in tools/ (bazel wrapper location) ==="
-          ls -la tools/ 2>/dev/null | head -20
-          echo "--- tools/bazel (we put a plain release binary here) ---"
-          file tools/bazel 2>/dev/null || true
-          echo "--- does the tree ship its own bazel wrapper? ---"
-          find . -maxdepth 4 -name 'bazel*' -not -path './bazel-cache/*' -not -path './out/*' 2>/dev/null | head -20
-          echo "--- prebuilts/build-tools present? ---"
-          ls -d prebuilts/build-tools prebuilts/kernel-build-tools 2>/dev/null || echo "none"
-          echo "=== patch rules_python reexports.bzl: bazel 8 removed native PyInfo ==="
-          RP=$(find bazel-cache -path '*rules_python*/python/private/reexports.bzl' 2>/dev/null | head -1)
-          if [ -z "$RP" ]; then
-            RP="external/bazelbuild-rules_python/python/private/reexports.bzl"
-          fi
-          echo "target: $RP"
-          if [ -f "$RP" ]; then
-            echo "--- original lines 40-50 ---"
-            sed -n '40,50p' "$RP"
-            if ! grep -q 'ACE5PRO_PYINFO_SHIM' "$RP"; then
-              # Replace direct builtin usage with a guarded fallback.
-              sed -i 's|^internal_PyInfo = PyInfo$|internal_PyInfo = PyInfo if "PyInfo" in dir() else provider(fields = {})  # ACE5PRO_PYINFO_SHIM|' "$RP"
-              sed -i 's|^internal_PyRuntimeInfo = PyRuntimeInfo$|internal_PyRuntimeInfo = PyRuntimeInfo if "PyRuntimeInfo" in dir() else provider(fields = {})  # ACE5PRO_PYINFO_SHIM|' "$RP"
-              echo "--- patched lines ---"
-              sed -n '40,50p' "$RP"
+          echo "--- clang prebuilt ---"
+          ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null || echo "no clang prebuilt"
+          echo "--- defconfig inputs ---"
+          ls -l msm-kernel/arch/arm64/configs/gki_defconfig 2>/dev/null || echo "no msm-kernel/arch/arm64/configs/gki_defconfig"
+          ls -l msm-kernel/arch/arm64/configs/vendor/sun_perf.config msm-kernel/arch/arm64/configs/vendor/sun_oplus_common.config 2>/dev/null || true
+          echo "--- our injected config lines ---"
+          tail -12 msm-kernel/arch/arm64/configs/vendor/sun_perf.config
+
+          BUILD_OK=0
+          if [ -f build/build.sh ]; then
+            echo "=== PATH 1: ACK wrapper build/build.sh (BUILD_CONFIG=msm-kernel/build.config.msm.sun) ==="
+            if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
+              echo "DRY_RUN: skip actual build"
+              BUILD_OK=1
             else
-              echo "already patched"
+              set +e
+              ROOT_DIR=$PWD KERNEL_DIR=msm-kernel \
+              BUILD_CONFIG=msm-kernel/build.config.msm.sun VARIANT="$BUILD_VARIANT_NAME" \
+                ./build/build.sh 2>&1 | tee /tmp/legacy_build.log
+              rc=${PIPESTATUS[0]}
+              set -e
+              echo "build.sh exit=$rc"
+              if [ "$rc" = "0" ] && [ "$(find . -name Image -not -path './out_manual/*' 2>/dev/null | wc -l)" -gt 0 ]; then
+                BUILD_OK=1
+              else
+                echo "--- last 40 lines of log ---"
+                tail -40 /tmp/legacy_build.log
+              fi
             fi
-          else
-            echo "NOT FOUND: $RP"
-            find bazel-cache -name 'reexports.bzl' 2>/dev/null | head -5
-            find external -name 'reexports.bzl' 2>/dev/null | head -5
           fi
-          echo "--- .bazelrc (bzlmod mode) ---"
-          echo 'common --enable_bzlmod' > .bazelrc
-          echo "common --enable_bzlmod" > user.bazelrc
-          cat .bazelrc
-          export BAZEL_ARGS="--enable_bzlmod"
-          ./tools/bazel --version || true
-          if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
-            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" --dry-run $BAZEL_ARGS
+
+          if [ "$BUILD_OK" = "0" ] && [ "${{ inputs.DRY_RUN }}" != "true" ]; then
+            echo "=== PATH 2: manual make (gki_defconfig + sun fragments) ==="
+            K=msm-kernel
+            CFGDIR=$K/arch/arm64/configs
+            OUT=$PWD/out_manual
+            CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
+            echo "clang: $CLANG_DIR"
+            if [ -z "$CLANG_DIR" ]; then echo "ERROR: no clang prebuilt"; exit 1; fi
+            export PATH="$CLANG_DIR/bin:$PATH"
+            export ARCH=arm64 LLVM=1 LLVM_IAS=1
+            rm -rf "$OUT" && mkdir -p "$OUT"
+            if [ ! -f "$CFGDIR/gki_defconfig" ]; then
+              echo "ERROR: $CFGDIR/gki_defconfig not found"
+              ls "$CFGDIR" | head -20
+              exit 1
+            fi
+            make -C $K O=$OUT gki_defconfig
+            FRAGS="$CFGDIR/vendor/sun_perf.config"
+            if [ -f "$CFGDIR/vendor/sun_oplus_common.config" ]; then
+              FRAGS="$FRAGS $CFGDIR/vendor/sun_oplus_common.config"
+            fi
+            echo "fragments: $FRAGS"
+            KCONFIG_CONFIG=$OUT/.config bash $K/scripts/kconfig/merge_config.sh -m $OUT/.config $FRAGS \
+              || { echo "ERROR: merge_config failed"; exit 1; }
+            make -C $K O=$OUT olddefconfig
+            make -C $K O=$OUT -j"$(nproc)" EXTRAVERSION=-android15-8 Image
+            if [ -f "$OUT/arch/arm64/boot/Image" ]; then
+              echo "manual build OK: $OUT/arch/arm64/boot/Image"
+              BUILD_OK=1
+            else
+              echo "ERROR: manual build produced no Image"
+              exit 1
+            fi
+          fi
+
+          if [ "$BUILD_OK" = "1" ]; then
+            echo "=== build finished (BUILD_OK=1) ==="
           else
-            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" $BAZEL_ARGS
+            echo "ERROR: no build path succeeded"
+            exit 1
           fi
 
       - name: verify_artifact
         if: ${{ !inputs.DRY_RUN }}
         run: |
           cd workspace/kernel_platform
-          IMG=$(find out -type f -name Image | head -1)
+          IMG=$(find . -type f -name Image -path '*arch/arm64/boot/Image' 2>/dev/null | head -1)
+          [ -z "$IMG" ] && IMG=$(find . -type f -name Image 2>/dev/null | head -1)
           echo "Image=$IMG"
           test -n "$IMG" && test -s "$IMG" || { echo "ERROR: Image missing"; exit 1; }
+          grep -a "Linux version" "$IMG" | head -1
           grep -a "Linux version" "$IMG" | grep -q "${{ env.GKI_VER_EXPECT }}" || { echo "ERROR: not ${{ env.GKI_VER_EXPECT }}"; exit 1; }
           grep -a "Linux version" "$IMG" | grep -q "abogki500782043-4k" || { echo "ERROR: localversion mismatch"; exit 1; }
-          CFG=$(find out -type f -name .config | head -1)
+          CFG=$(find . -type f -name .config 2>/dev/null | head -1)
           echo "config=$CFG"
+          test -n "$CFG" || { echo "ERROR: .config not found"; exit 1; }
           grep -qE "^CONFIG_KSU=y" "$CFG" || { echo "ERROR: KSU off"; exit 1; }
           grep -qE "^CONFIG_KPM=y" "$CFG" || { echo "ERROR: KPM off"; exit 1; }
           grep -qE "^CONFIG_KSU_SUSFS=y" "$CFG" || { echo "ERROR: SUSFS off"; exit 1; }
@@ -277,7 +271,9 @@ jobs:
         if: ${{ !inputs.DRY_RUN }}
         run: |
           cd workspace/kernel_platform
-          IMG=$(find out -type f -name Image | head -1)
+          IMG=$(find . -type f -name Image -path '*arch/arm64/boot/Image' 2>/dev/null | head -1)
+          [ -z "$IMG" ] && IMG=$(find . -type f -name Image 2>/dev/null | head -1)
+          echo "packaging: $IMG"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/ak3
           cp "$IMG" /tmp/ak3/Image
           sed -i 's/^is_slot_device=.*/is_slot_device=1;/' /tmp/ak3/anykernel.sh
