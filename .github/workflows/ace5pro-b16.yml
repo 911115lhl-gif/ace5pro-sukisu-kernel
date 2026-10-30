@@ -142,21 +142,45 @@ jobs:
 
       - name: apply_sukisu
         run: |
-          # SukiSU-Ultra's `builtin` branch ships SUSFS support in-tree:
-          #   kernel/Kconfig defines KSU, KPM, KSU_SUSFS and all KSU_SUSFS_* options
-          #   (main branch has NO KSU_SUSFS at all), so no KernelSU-side SUSFS patch
-          #   is needed or wanted - applying one corrupts the refactored sources
-          #   (this is what produced the ksu_late_loaded / ksu_lsm_hook_* errors).
-          git clone --depth=1 -b builtin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu
-          echo "--- confirm SUSFS symbols exist in the cloned branch ---"
-          grep -c "config KSU_SUSFS" /tmp/sukisu/kernel/Kconfig || true
-          grep -q "config KSU_SUSFS" /tmp/sukisu/kernel/Kconfig || { echo "ERROR: builtin branch lacks KSU_SUSFS"; exit 1; }
-          grep -q "config KPM" /tmp/sukisu/kernel/Kconfig || { echo "ERROR: builtin branch lacks KPM"; exit 1; }
-          echo "builtin branch has KSU + KPM + KSU_SUSFS"
+          # SukiSU-Ultra's `builtin` branch ships the SUSFS glue in-tree
+          # (kernel/Kconfig defines KSU, KPM, KSU_SUSFS and every KSU_SUSFS_*), while
+          # `main` has no KSU_SUSFS at all. So we need the builtin branch and we must
+          # NOT apply 10_enable_susfs_for_ksu.patch (it targets upstream KernelSU and
+          # corrupts SukiSU's refactored sources -> ksu_late_loaded / ksu_lsm_hook_*).
+          #
+          # IMPORTANT: kernel/setup.sh itself clones SukiSU into msm-kernel/KernelSU and
+          # then force-checkouts `main` + the newest tag, which would silently throw our
+          # branch away. We therefore do the integration manually and only borrow the
+          # Makefile/Kconfig wiring logic from setup.sh.
+          SUKISU_REF="builtin"
+          git clone --depth=1 -b "$SUKISU_REF" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu \
+            || { echo "ERROR: clone $SUKISU_REF failed"; exit 1; }
+          echo "--- confirm the branch really provides the SUSFS symbols ---"
+          grep -n "config KSU_SUSFS$" /tmp/sukisu/kernel/Kconfig || { echo "ERROR: $SUKISU_REF lacks KSU_SUSFS"; exit 1; }
+          grep -n "config KPM$"         /tmp/sukisu/kernel/Kconfig || { echo "ERROR: $SUKISU_REF lacks KPM"; exit 1; }
+
           cd workspace/kernel_platform/msm-kernel
-          bash /tmp/sukisu/kernel/setup.sh || { echo "ERROR: sukisu setup.sh failed"; exit 1; }
-          find . -name 'allowlist.c' | grep -q . || { echo "ERROR: allowlist.c not found, sukisu kernel not integrated"; exit 1; }
-          echo "sukisu integrated ok"
+          echo "=== install SukiSU into drivers/kernelsu (no re-clone, no branch switching) ==="
+          rm -f drivers/kernelsu
+          mkdir -p drivers
+          cp -a /tmp/sukisu/kernel drivers/kernelsu
+          echo "--- installed tree ---"
+          ls drivers/kernelsu | head
+          test -f drivers/kernelsu/Kconfig || { echo "ERROR: drivers/kernelsu/Kconfig missing"; exit 1; }
+          grep -c "config KSU_SUSFS" drivers/kernelsu/Kconfig || true
+
+          echo "=== wire it into the kernel build ==="
+          grep -q "obj-\$(CONFIG_KSU)" drivers/Makefile \
+            || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig \
+            || sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          echo "--- drivers/Makefile KSU line ---"
+          grep -n "CONFIG_KSU" drivers/Makefile || true
+          echo "--- drivers/Kconfig KSU line ---"
+          grep -n "kernelsu/Kconfig" drivers/Kconfig || { echo "ERROR: Kconfig wiring failed"; exit 1; }
+
+          find . -name 'allowlist.c' | grep -q . || { echo "ERROR: allowlist.c not found"; exit 1; }
+          echo "sukisu integrated ok (branch=$SUKISU_REF, manual install)"
 
       - name: apply_susfs
         if: ${{ inputs.ENABLE_SUSFS == true }}
@@ -421,8 +445,9 @@ jobs:
                 grep -rn "kernelsu\|KernelSU\|sukisu" $K/Kconfig $K/drivers/Kconfig 2>/dev/null | head -5 || true
                 echo "--- KSU files present in tree? ---"
                 find $K -maxdepth 3 \( -iname '*kernelsu*' -o -iname 'allowlist.c' \) 2>/dev/null | head -5 || true
-                echo "--- what setup.sh actually did ---"
-                ls -la $K/KernelSU 2>/dev/null || echo "no $K/KernelSU dir"
+                echo "--- what apply_sukisu installed ---"
+                ls -la $K/drivers/kernelsu/Kconfig 2>/dev/null || echo "no drivers/kernelsu/Kconfig"
+                grep -n "CONFIG_KSU" $K/drivers/Makefile 2>/dev/null || echo "no KSU line in drivers/Makefile"
                 exit 1
               fi
               if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ] && ! grep -qE "^CONFIG_KSU_SUSFS=y" "$OUT/.config"; then
