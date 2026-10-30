@@ -223,11 +223,25 @@ jobs:
 
       - name: write_kernel_config
         run: |
+          # CRITICAL: this build must produce a PURE GKI kernel.
+          #
+          # The stock boot.img kernel has y=2034 / m=98 symbols and contains NO
+          # Qualcomm/OnePlus drivers: CONFIG_ARCH_SUN, CONFIG_ARM_SMMU,
+          # CONFIG_COMMON_CLK_QCOM, CONFIG_CFG80211 etc. are all absent (=n) in the
+          # stock kernel because those live in the untouched vendor_dlkm partition.
+          #
+          # Merging vendor/sun_perf.config (470 modules including SMMU/CLK/interconnect/
+          # display/charger) produced a 30MB image instead of the stock 40MB, duplicated
+          # what vendor_dlkm already provides and panicked at boot -> bootloop.
+          #
+          # So we only use gki_defconfig (Google GKI) plus the root features.
           cd workspace/kernel_platform/msm-kernel
-          CFG=arch/arm64/configs/vendor/sun_perf.config
-          test -f "$CFG" || { echo "ERROR: $CFG not found"; ls arch/arm64/configs/vendor/ | head -20; exit 1; }
+          CFG=arch/arm64/configs/gki_defconfig
+          test -f "$CFG" || { echo "ERROR: $CFG not found"; ls arch/arm64/configs/ | head -20; exit 1; }
+          echo "--- gki_defconfig original tail ---"
+          tail -5 "$CFG"
           echo "" >> "$CFG"
-          echo "# ==== injected by ace5pro workflow ====" >> "$CFG"
+          echo "# ==== injected by ace5pro workflow (pure GKI + root) ====" >> "$CFG"
           echo "CONFIG_KSU=y" >> "$CFG"
           if [ "${{ inputs.ENABLE_KPM }}" = "true" ]; then
             echo "CONFIG_KPM=y" >> "$CFG"
@@ -236,8 +250,6 @@ jobs:
           fi
           if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
             # SukiSU's builtin Kconfig gates KSU_SUSFS behind THREAD_INFO_IN_TASK.
-            # If that symbol is not y in the final .config, olddefconfig silently
-            # drops KSU_SUSFS and every KSU_SUSFS_* option with it.
             echo "CONFIG_THREAD_INFO_IN_TASK=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CFG"
@@ -257,15 +269,14 @@ jobs:
           echo "CONFIG_ARM64_4K_PAGES=y" >> "$CFG"
           echo "# CONFIG_ARM64_16K_PAGES is not set" >> "$CFG"
           echo "# CONFIG_ARM64_64K_PAGES is not set" >> "$CFG"
-          # Reproduce the exact stock release string. gki_defconfig ships
-          # CONFIG_LOCALVERSION="-4k" and scripts/setlocalversion appends
-          # "-g<commit>", producing 6.6.118-android15-8-4k-gXXXX. The stock value is
+          # Release string: gki_defconfig ships CONFIG_LOCALVERSION="-4k" and
+          # CONFIG_LOCALVERSION_AUTO=y. The stock running kernel reports
           # 6.6.118-android15-8-g93e223c276e7-abogki500782043-4k, so CONFIG_LOCALVERSION
-          # carries the whole suffix and setlocalversion must add nothing.
+          # must carry the whole suffix and setlocalversion must add nothing.
           echo "CONFIG_LOCALVERSION_AUTO=n" >> "$CFG"
           echo "CONFIG_LOCALVERSION=\"${{ inputs.LOCALVERSION }}\"" >> "$CFG"
           echo "--- appended config ---"
-          tail -14 "$CFG"
+          tail -16 "$CFG"
 
       - name: check_release_string_logic
         run: |
@@ -322,9 +333,8 @@ jobs:
           ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null || echo "no clang prebuilt"
           echo "--- defconfig inputs ---"
           ls -l msm-kernel/arch/arm64/configs/gki_defconfig 2>/dev/null || echo "no msm-kernel/arch/arm64/configs/gki_defconfig"
-          ls -l msm-kernel/arch/arm64/configs/vendor/sun_perf.config msm-kernel/arch/arm64/configs/vendor/sun_oplus_common.config 2>/dev/null || true
-          echo "--- our injected config lines ---"
-          tail -12 msm-kernel/arch/arm64/configs/vendor/sun_perf.config
+          echo "--- our injected config lines (in gki_defconfig) ---"
+          tail -16 msm-kernel/arch/arm64/configs/gki_defconfig
 
           BUILD_OK=0
           if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
@@ -400,34 +410,32 @@ jobs:
               fi
               make -C $K O=$OUT gki_defconfig
               test -s "$OUT/.config" || { echo "ERROR: gki_defconfig produced empty .config"; exit 1; }
-              # NOTE: $PWD changes after cd, so freeze absolute paths into variables first.
+              # PURE GKI: no vendor fragment is merged here on purpose (see
+              # write_kernel_config). The injected root options are already appended to
+              # gki_defconfig itself, so one olddefconfig pass finalises everything.
               PLAT="$PWD"
               KDIR="$PLAT/$K"
               BASE_CFG="$OUT/.config"
-              MERGE="$KDIR/scripts/kconfig/merge_config.sh"
-              FRAGS="$KDIR/arch/arm64/configs/vendor/sun_perf.config"
-              if [ -s "$KDIR/arch/arm64/configs/vendor/sun_oplus_common.config" ]; then
-                FRAGS="$FRAGS $KDIR/arch/arm64/configs/vendor/sun_oplus_common.config"
-              else
-                echo "skip empty fragment sun_oplus_common.config"
-              fi
-              for frag in $FRAGS; do
-                test -f "$frag" || { echo "ERROR: fragment not found: $frag"; exit 1; }
-              done
-              echo "base: $BASE_CFG"
-              echo "fragments: $FRAGS"
-              echo "merge script: $MERGE"
-              test -f "$BASE_CFG" || { echo "ERROR: base config missing: $BASE_CFG"; exit 1; }
-              test -f "$MERGE" || { echo "ERROR: merge_config.sh missing: $MERGE"; exit 1; }
-              # merge_config.sh: with KCONFIG_CONFIG set, -O is ignored (it is only a
-              # fallback for deriving KCONFIG_CONFIG), so we omit it. -m = don't run make.
-              # Run it from the kernel dir so its internal relative paths resolve; the
-              # script and config paths are pre-frozen absolute values.
-              ( cd "$KDIR" && KCONFIG_CONFIG="$BASE_CFG" bash "$MERGE" -m -r -y "$BASE_CFG" $FRAGS ) \
-                || { echo "ERROR: merge_config failed"; exit 1; }
-              echo "--- merged .config size ---"
-              wc -l "$BASE_CFG" || true
+              echo "base: $BASE_CFG (gki_defconfig + injected root options, no vendor fragment)"
               make -C $K O=$OUT olddefconfig
+
+              echo "=== PURE-GKI assertions (must match the stock kernel) ==="
+              MODS=$(grep -cE '^CONFIG_[A-Za-z0-9_]+=m$' "$OUT/.config" || true)
+              BUILTINS=$(grep -cE '^CONFIG_[A-Za-z0-9_]+=y$' "$OUT/.config" || true)
+              echo "  symbols: y=$BUILTINS  m=$MODS   (stock boot kernel: y=2034 m=98)"
+              if [ "$MODS" -gt 150 ]; then
+                echo "ERROR: $MODS modules - vendor fragment leaked in, this kernel will bootloop"
+                grep -E '^CONFIG_[A-Za-z0-9_]+=m$' "$OUT/.config" | grep -E 'SMMU|CLK_QCOM|INTERCONNECT|OPLUS|MSM_|ADRENO|CFG80211' | head -20
+                exit 1
+              fi
+              for s in CONFIG_ARCH_SUN CONFIG_ARM_SMMU CONFIG_COMMON_CLK_QCOM CONFIG_CFG80211; do
+                if grep -qE "^$s=[ym]" "$OUT/.config"; then
+                  echo "ERROR: $s is enabled - stock kernel does not have it; this is a vendor driver that belongs to vendor_dlkm"
+                  exit 1
+                fi
+              done
+              echo "  OK: no vendor platform drivers, module count matches a pure GKI build"
+
               echo "--- resulting key configs ---"
               grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|THREAD_INFO_IN_TASK|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)=" "$OUT/.config" || true
               echo "--- SUSFS dependency diagnostics ---"
@@ -454,8 +462,8 @@ jobs:
                 echo "ERROR: CONFIG_KSU_SUSFS did not survive olddefconfig"
                 echo "--- is the builtin branch actually in use? (Kconfig tail) ---"
                 tail -20 "$K/drivers/kernelsu/Kconfig" 2>/dev/null || echo "no drivers/kernelsu/Kconfig"
-                echo "--- KSU_SUSFS as merged into .config before olddefconfig (fragment) ---"
-                grep -E "KSU_SUSFS" $K/arch/arm64/configs/vendor/sun_perf.config || true
+                echo "--- injected SUSFS lines in gki_defconfig ---"
+                grep -E "KSU_SUSFS|THREAD_INFO_IN_TASK" $K/arch/arm64/configs/gki_defconfig || true
                 exit 1
               fi
               # Release string target:
