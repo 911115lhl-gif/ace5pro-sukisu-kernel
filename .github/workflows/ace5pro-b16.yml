@@ -54,7 +54,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # ubuntu-22.04 has a shrinking hosted pool and can queue for 20+ minutes;
+    # 24.04 is the current default and gets scheduled immediately.
+    runs-on: ubuntu-24.04
     env:
       MANIFEST: oneplus_ace5_pro_b.xml
       MANIFEST_BRANCH: oneplus/sm8750
