@@ -673,16 +673,20 @@ jobs:
           rm -f "/tmp/artifact/$ZIP"
           # Keep the archive outside the source tree so zip cannot include itself.
           # -r9 preserves directory entries and '/' paths required by Android recovery.
-          zip -r9 "/tmp/artifact/$ZIP" . -x '.git/*' '**/.git/*' '*.zip' '**/*.zip'
+          zip -r9 "/tmp/artifact/$ZIP" . -x '.git/*' '**/.git/*' '*.zip' '**/*.zip' || { echo "ERROR: zip failed"; exit 1; }
           echo "--- zip contents (directories must be listed) ---"
           unzip -l "/tmp/artifact/$ZIP" | head -40
           # the kernel and the installer must be inside the zip
           unzip -l "/tmp/artifact/$ZIP" | grep -q 'Image' || { echo "ERROR: Image not in zip"; exit 1; }
           unzip -l "/tmp/artifact/$ZIP" | grep -q 'anykernel.sh' || { echo "ERROR: anykernel.sh not in zip"; exit 1; }
           unzip -l "/tmp/artifact/$ZIP" | grep -q 'META-INF/com/google/android/update-binary' || { echo "ERROR: update-binary not in zip"; exit 1; }
-          # no nested archive
-          if unzip -Z1 "/tmp/artifact/$ZIP" | grep -qE '(^|/)[^/]+\.zip$'; then
+          # no nested archive: inspect entry names only (unzip -Z1 prints names, so the
+          # "Archive: ...zip" banner of unzip -l cannot produce a false positive)
+          NESTED=$(unzip -Z1 "/tmp/artifact/$ZIP" | grep -cE '\.zip$' || true)
+          echo "nested .zip entries inside the package: $NESTED"
+          if [ "$NESTED" != "0" ]; then
             echo "ERROR: nested zip inside the package"
+            unzip -Z1 "/tmp/artifact/$ZIP" | grep -E '\.zip$'
             exit 1
           fi
           echo "--- anykernel.sh (final, as shipped) ---"
