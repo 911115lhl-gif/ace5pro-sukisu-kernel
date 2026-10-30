@@ -269,6 +269,17 @@ jobs:
             echo "# CONFIG_KSU_SUSFS is not set" >> "$CFG"
           fi
           echo "CONFIG_KALLSYMS_ALL=y" >> "$CFG"
+          # The stock boot kernel does NOT contain these OnePlus hooks, and they are
+          # absent from its embedded config:
+          #   CONFIG_OPLUS_FEATURE_STORAGE_IOLATENCY_STATS
+          #   CONFIG_OPLUS_SCHED_GROUP_OPT
+          #   CONFIG_OPLUS_SYSTEM_KERNEL_QCOM
+          # msm-kernel's gki_defconfig turns them on by default, but they hook the core
+          # scheduler / block layer and expect the full vendor stack. Leaving them on in
+          # a pure GKI image panics before init (logo shown, then black + reboot loop).
+          for s in OPLUS_FEATURE_STORAGE_IOLATENCY_STATS OPLUS_SCHED_GROUP_OPT OPLUS_SYSTEM_KERNEL_QCOM; do
+            echo "# CONFIG_$s is not set" >> "$CFG"
+          done
           # device ships a 4K-page GKI kernel; stock vendor_dlkm modules are 4K
           echo "CONFIG_ARM64_4K_PAGES=y" >> "$CFG"
           echo "# CONFIG_ARM64_16K_PAGES is not set" >> "$CFG"
@@ -439,6 +450,16 @@ jobs:
                 fi
               done
               echo "  OK: no vendor platform drivers, module count matches a pure GKI build"
+
+              echo "--- OnePlus hooks that must stay OFF (absent from the stock boot kernel) ---"
+              for s in OPLUS_FEATURE_STORAGE_IOLATENCY_STATS OPLUS_SCHED_GROUP_OPT OPLUS_SYSTEM_KERNEL_QCOM; do
+                if grep -qE "^CONFIG_$s=[ym]" "$OUT/.config"; then
+                  echo "ERROR: CONFIG_$s is enabled - the stock kernel does not have it and it hooks"
+                  echo "       the scheduler/block layer; it panics before init on a pure GKI image"
+                  exit 1
+                fi
+                echo "  CONFIG_$s: off"
+              done
 
               echo "--- resulting key configs ---"
               grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|THREAD_INFO_IN_TASK|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)=" "$OUT/.config" || true
