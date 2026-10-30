@@ -173,11 +173,13 @@ jobs:
           done
           echo "=== all external dirs ==="
           ls external/ 2>/dev/null | head -40
-          echo "=== kleaf uses WORKSPACE mode, disable bzlmod everywhere ==="
-          printf 'common --noenable_bzlmod\nbuild --noenable_bzlmod\nquery --noenable_bzlmod\n' > .bazelrc
-          printf 'common --noenable_bzlmod\nbuild --noenable_bzlmod\nquery --noenable_bzlmod\n' > user.bazelrc
+          echo "=== kleaf uses WORKSPACE mode (bazel 8 disables it by default) ==="
+          echo 'common --noenable_bzlmod --enable_workspace' > .bazelrc
+          echo 'build --noenable_bzlmod --enable_workspace' >> .bazelrc
+          echo 'query --noenable_bzlmod --enable_workspace' >> .bazelrc
+          cp .bazelrc user.bazelrc
           echo "--- .bazelrc ---"; cat .bazelrc
-          export BAZEL_ARGS="--noenable_bzlmod"
+          export BAZEL_ARGS="--noenable_bzlmod --enable_workspace"
           if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
             python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" --dry-run $BAZEL_ARGS
           else
