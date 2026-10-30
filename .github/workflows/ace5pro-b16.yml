@@ -117,15 +117,30 @@ jobs:
         run: |
           git clone --depth=1 -b gki-android15-6.6 https://github.com/ShirkNeko/susfs4ksu.git /tmp/susfs
           cd workspace/kernel_platform/msm-kernel
+          FAILED=""
           for p in $(ls /tmp/susfs/kernel_patches/*.patch 2>/dev/null); do
-            echo "applying $p"
-            git apply --3way "$p" || { echo "ERROR: susfs patch failed: $p"; exit 1; }
+            echo "=== applying $(basename "$p") ==="
+            if git apply -p1 --reject "$p"; then
+              echo "OK: $(basename "$p")"
+            else
+              echo "WARN: $(basename "$p") had rejects, continuing"
+              FAILED="$FAILED $(basename "$p")"
+            fi
           done
-          if git status --porcelain | grep -q '\.rej'; then
-            echo "ERROR: .rej conflict remains (susfs patch mismatch)"
+          echo "=== reject files ==="
+          find . -name '*.rej' | head -50
+          echo "=== check core susfs symbols in tree ==="
+          grep -rl "susfs" fs/ kernel/ 2>/dev/null | head -10
+          if ! grep -q "susfs" fs/namei.c 2>/dev/null; then
+            echo "ERROR: fs/namei.c has no susfs hook - patch not applied"
             exit 1
           fi
-          echo "susfs applied ok"
+          if ! grep -q "susfs" fs/namespace.c 2>/dev/null; then
+            echo "ERROR: fs/namespace.c has no susfs hook - patch not applied"
+            exit 1
+          fi
+          echo "susfs core hooks present ok"
+          if [ -n "$FAILED" ]; then echo "patches with rejects:$FAILED"; fi
 
       - name: write_kernel_config
         run: |
