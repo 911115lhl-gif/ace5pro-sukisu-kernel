@@ -1,0 +1,188 @@
+name: ace5pro-b16-sukisu-susfs-kpm
+
+on:
+  workflow_dispatch:
+    inputs:
+      CPU:
+        description: "platform (only sm8750)"
+        required: true
+        default: "sm8750"
+        type: choice
+        options:
+          - sm8750
+      FEIL:
+        description: "manifest target (only oneplus_ace5_pro_b)"
+        required: true
+        default: "oneplus_ace5_pro_b"
+        type: choice
+        options:
+          - oneplus_ace5_pro_b
+      CPUD:
+        description: "device codename (sun)"
+        required: true
+        default: "sun"
+      VARIANT:
+        description: "build variant (perf matches stock)"
+        required: true
+        default: "perf"
+        type: choice
+        options:
+          - perf
+      ENABLE_KPM:
+        description: "enable KPM"
+        required: true
+        default: true
+        type: boolean
+      ENABLE_SUSFS:
+        description: "enable SUSFS"
+        required: true
+        default: true
+        type: boolean
+      LOCALVERSION:
+        description: "CONFIG_LOCALVERSION (keep stock, do not change)"
+        required: true
+        default: "-g93e223c276e7-abogki500782043-4k"
+      DRY_RUN:
+        description: "dry-run verify only (no real build)"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      MANIFEST: oneplus_ace5_pro_b.xml
+      MANIFEST_BRANCH: oneplus/sm8750
+      TARGET: sun
+      GKI_VER_EXPECT: "6.6.118-android15-8"
+      BAZEL_VERSION: "7.4.1"
+
+    steps:
+      - name: guard_params
+        run: |
+          set -e
+          [ "${{ inputs.CPU }}" = "sm8750" ] || { echo "ERROR: CPU must be sm8750"; exit 1; }
+          [ "${{ inputs.FEIL }}" = "oneplus_ace5_pro_b" ] || { echo "ERROR: FEIL must be oneplus_ace5_pro_b"; exit 1; }
+          [ "${{ inputs.CPUD }}" = "sun" ] || { echo "ERROR: CPUD must be sun"; exit 1; }
+          [ "${{ inputs.VARIANT }}" = "perf" ] || { echo "ERROR: VARIANT must be perf"; exit 1; }
+          echo "commit=${GITHUB_SHA}"
+          echo "SHORT_SHA=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+          echo "guard ok"
+
+      - name: install_repo
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: repo_sync
+        run: |
+          mkdir -p workspace && cd workspace
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+                    -b "$MANIFEST_BRANCH" -m "$MANIFEST" --depth=1
+          for i in 1 2 3; do
+            echo "repo sync attempt $i"
+            repo sync -c -j"$(nproc)" --fail-fast && break
+            echo "sync failed, retry in 5s"
+            sleep 5
+            [ "$i" = "3" ] && exit 1
+          done
+          grep -q "SUBLEVEL = 118" kernel_platform/common/Makefile || { echo "ERROR: common not 6.6.118"; exit 1; }
+          grep -q "SUBLEVEL = 118" kernel_platform/msm-kernel/Makefile || { echo "ERROR: msm-kernel not 6.6.118"; exit 1; }
+          echo "source is 6.6.118 ok"
+
+      - name: install_bazel
+        run: |
+          curl -fsSL -o /tmp/bazel "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64"
+          chmod +x /tmp/bazel
+          mkdir -p workspace/kernel_platform/tools
+          cp /tmp/bazel workspace/kernel_platform/tools/bazel
+
+      - name: apply_sukisu
+        run: |
+          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu
+          cd workspace/kernel_platform/msm-kernel
+          bash /tmp/sukisu/kernel/setup.sh || { echo "ERROR: sukisu setup.sh failed"; exit 1; }
+          find . -name 'allowlist.c' | grep -q . || { echo "ERROR: allowlist.c not found, sukisu kernel not integrated"; exit 1; }
+          echo "sukisu integrated ok"
+
+      - name: apply_susfs
+        if: ${{ inputs.ENABLE_SUSFS }}
+        run: |
+          git clone --depth=1 -b gki-android15-6.6 https://github.com/ShirkNeko/susfs4ksu.git /tmp/susfs
+          cd workspace/kernel_platform/msm-kernel
+          for p in $(ls /tmp/susfs/kernel_patches/*.patch 2>/dev/null); do
+            echo "applying $p"
+            git apply --3way "$p" || { echo "ERROR: susfs patch failed: $p"; exit 1; }
+          done
+          if git status --porcelain | grep -q '\.rej'; then
+            echo "ERROR: .rej conflict remains (susfs patch mismatch)"
+            exit 1
+          fi
+          echo "susfs applied ok"
+
+      - name: write_kernel_config
+        run: |
+          cd workspace/kernel_platform/msm-kernel
+          CFG=arch/arm64/configs/vendor/sun_perf.config
+          cat >> "$CFG" <<'EOF'
+
+CONFIG_KSU=y
+CONFIG_KPM=y
+CONFIG_KSU_SUSFS=y
+CONFIG_KALLSYMS_ALL=y
+CONFIG_LOCALVERSION_AUTO=n
+EOF
+          echo "CONFIG_LOCALVERSION=\"${{ inputs.LOCALVERSION }}\"" >> "$CFG"
+          grep -E "CONFIG_KSU=|CONFIG_KPM=|CONFIG_KSU_SUSFS=|CONFIG_LOCALVERSION" "$CFG"
+
+      - name: build_kernel
+        run: |
+          cd workspace/kernel_platform
+          if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
+            python3 build_with_bazel.py -t "$TARGET" "$VARIANT" --dry-run
+          else
+            python3 build_with_bazel.py -t "$TARGET" "$VARIANT"
+          fi
+
+      - name: verify_artifact
+        if: ${{ !inputs.DRY_RUN }}
+        run: |
+          cd workspace/kernel_platform
+          IMG=$(find out -type f -name Image | head -1)
+          echo "Image=$IMG"
+          test -n "$IMG" && test -s "$IMG" || { echo "ERROR: Image missing"; exit 1; }
+          grep -a "Linux version" "$IMG" | grep -q "${{ env.GKI_VER_EXPECT }}" || { echo "ERROR: not ${{ env.GKI_VER_EXPECT }}"; exit 1; }
+          grep -a "Linux version" "$IMG" | grep -q "abogki500782043-4k" || { echo "ERROR: localversion mismatch"; exit 1; }
+          CFG=$(find out -type f -name .config | head -1)
+          echo "config=$CFG"
+          grep -qE "^CONFIG_KSU=y" "$CFG" || { echo "ERROR: KSU off"; exit 1; }
+          grep -qE "^CONFIG_KPM=y" "$CFG" || { echo "ERROR: KPM off"; exit 1; }
+          grep -qE "^CONFIG_KSU_SUSFS=y" "$CFG" || { echo "ERROR: SUSFS off"; exit 1; }
+          grep -qE "^CONFIG_ARM64=y" "$CFG" || { echo "ERROR: not arm64"; exit 1; }
+          grep -qE "^CONFIG_ARM64_4K_PAGES=y" "$CFG" || { echo "ERROR: not 4k pages"; exit 1; }
+          echo "artifact verify ok"
+
+      - name: package_ak3
+        if: ${{ !inputs.DRY_RUN }}
+        run: |
+          cd workspace/kernel_platform
+          IMG=$(find out -type f -name Image | head -1)
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/ak3
+          cp "$IMG" /tmp/ak3/Image
+          sed -i 's/^is_slot_device=.*/is_slot_device=1;/' /tmp/ak3/anykernel.sh
+          sed -i 's|^block=.*|block=auto;|' /tmp/ak3/anykernel.sh
+          cd /tmp/ak3
+          ZIP="AnyKernel3-sun-sm8750-b16-SukiSU-SUSFS-KPM-${SHORT_SHA}.zip"
+          zip -r9 "$ZIP" . -x '.git/*'
+          mkdir -p /tmp/artifact && cp "$ZIP" /tmp/artifact/
+          unzip -l "/tmp/artifact/$ZIP" | head -30
+
+      - name: upload_artifact
+        if: ${{ !inputs.DRY_RUN }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ace5pro-sun-b16-SukiSU-SUSFS-KPM-${{ env.SHORT_SHA }}
+          path: /tmp/artifact/*.zip
