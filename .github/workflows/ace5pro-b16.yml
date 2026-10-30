@@ -48,6 +48,10 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: ace5pro-b16-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-22.04
