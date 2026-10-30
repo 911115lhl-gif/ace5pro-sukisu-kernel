@@ -61,7 +61,7 @@ jobs:
       TARGET: sun
       BUILD_VARIANT_NAME: ${{ inputs.BUILD_VARIANT }}
       GKI_VER_EXPECT: "6.6.118-android15-8"
-      BAZEL_VERSION: "7.4.1"
+      BAZEL_VERSION: "8.1.1"
 
     steps:
       - name: guard_params
