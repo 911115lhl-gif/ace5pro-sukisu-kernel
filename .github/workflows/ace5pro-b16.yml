@@ -195,19 +195,25 @@ jobs:
           ls -l MODULE.bazel
           echo "--- before: grep apple_support ---"
           grep -n 'apple_support' "$MODFILE"
-          # bazel 8 needs bazel_dep for each local_path_override; put it BEFORE any override.
-          # Our own marker line makes this idempotent.
+          # module() must be the very first call; bazel_dep must come after module()
+          # but before local_path_override(). Insert right after the closing ")" of module().
           if ! grep -q 'ACE5PRO_PATCHED' "$MODFILE"; then
-            printf '%s\n%s\n\n' \
-              'bazel_dep(name = "apple_support", version = "1.0.0")  # ACE5PRO_PATCHED' \
-              'bazel_dep(name = "rules_java", version = "7.12.2")  # ACE5PRO_PATCHED' \
-              > /tmp/dep_head.txt
-            cat /tmp/dep_head.txt "$MODFILE" > /tmp/module.new
+            awk '
+              { print }
+              /^\)$/ && !done && seen_module {
+                print ""
+                print "bazel_dep(name = \"apple_support\", version = \"1.0.0\")  # ACE5PRO_PATCHED"
+                print "bazel_dep(name = \"rules_java\", version = \"7.12.2\")  # ACE5PRO_PATCHED"
+                print ""
+                done = 1
+              }
+              /^module\($/ { seen_module = 1 }
+            ' "$MODFILE" > /tmp/module.new
             mv /tmp/module.new "$MODFILE"
-            echo "prepended bazel_dep lines"
+            echo "inserted bazel_dep after module()"
           fi
-          echo "--- after: head -8 ---"
-          head -8 "$MODFILE"
+          echo "--- after: head -26 ---"
+          head -26 "$MODFILE"
           echo "--- .bazelrc (bzlmod mode) ---"
           echo 'common --enable_bzlmod' > .bazelrc
           echo "common --enable_bzlmod" > user.bazelrc
