@@ -173,13 +173,20 @@ jobs:
           done
           echo "=== all external dirs ==="
           ls external/ 2>/dev/null | head -40
-          echo "=== kleaf uses WORKSPACE mode (bazel 8 disables it by default) ==="
-          echo 'common --noenable_bzlmod --enable_workspace' > .bazelrc
-          echo 'build --noenable_bzlmod --enable_workspace' >> .bazelrc
-          echo 'query --noenable_bzlmod --enable_workspace' >> .bazelrc
-          cp .bazelrc user.bazelrc
-          echo "--- .bazelrc ---"; cat .bazelrc
-          export BAZEL_ARGS="--noenable_bzlmod --enable_workspace"
+          echo "=== kleaf uses bzlmod (MODULE.bazel + local_path_override) ==="
+          # bazel 8 requires bazel_dep for every local_path_override target.
+          # kleaf's MODULE.bazel overrides apple_support without declaring bazel_dep,
+          # so append the missing declaration to the root module.
+          if ! grep -q 'name = "apple_support"' MODULE.bazel 2>/dev/null; then
+            echo 'bazel_dep(name = "apple_support", version = "1.0.0")' >> MODULE.bazel
+            echo "appended bazel_dep apple_support"
+          fi
+          echo "--- MODULE.bazel tail ---"; tail -5 MODULE.bazel
+          echo "--- .bazelrc (bzlmod mode) ---"
+          echo 'common --enable_bzlmod' > .bazelrc
+          echo "common --enable_bzlmod" > user.bazelrc
+          cat .bazelrc
+          export BAZEL_ARGS="--enable_bzlmod"
           if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
             python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" --dry-run $BAZEL_ARGS
           else
