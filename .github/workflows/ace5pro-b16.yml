@@ -172,6 +172,13 @@ jobs:
           cp -v /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch "$KSU_ROOT/" || { echo "ERROR: copy ksu patch"; exit 1; }
           ( cd "$KSU_ROOT" && patch -p1 --forward < 10_enable_susfs_for_ksu.patch ) || echo "WARN: KernelSU patch had rejects (see .rej below)"
 
+          echo "--- did KSU_SUSFS land in KernelSU Kconfig? ---"
+          grep -n "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" || { echo "ERROR: KSU_SUSFS not in KernelSU/kernel/Kconfig"; exit 1; }
+
+          echo "=== make sure the kernel tree sources KernelSU's Kconfig ==="
+          # find where CONFIG_KSU gets declared and confirm the Kconfig chain reaches it
+          grep -rn "KernelSU\|kernelsu" "$KDIR/Kbuild" "$KDIR/Kconfig" "$KDIR/drivers/Kconfig" 2>/dev/null | head -10 || true
+
           echo "=== step 8: patch kernel tree with 50_add_susfs patch ==="
           P50=$(ls /tmp/susfs/kernel_patches/50_add_susfs_in_gki-android15-*.patch 2>/dev/null | head -1)
           echo "patch: $P50"
@@ -209,6 +216,12 @@ jobs:
           fi
           if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
             echo "CONFIG_KSU_SUSFS=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$CFG"
           else
             echo "# CONFIG_KSU_SUSFS is not set" >> "$CFG"
           fi
@@ -392,11 +405,22 @@ jobs:
               echo "--- pre-build sanity ---"
               echo "LOCALVERSION is set to: '${LOCALVERSION}'"
               grep -E "^CONFIG_LOCALVERSION" "$OUT/.config" || true
-              echo "--- predicted release string (make kernelrelease) ---"
-              REL=$(make -C $K O=$OUT EXTRAVERSION=-android15-8 LOCALVERSION= kernelrelease 2>/dev/null | tail -1)
+              # LOCALVERSION_AUTO=y would make setlocalversion emit "+"; force-verify it
+              if grep -qE "^CONFIG_LOCALVERSION_AUTO=y" "$OUT/.config"; then
+                echo "ERROR: CONFIG_LOCALVERSION_AUTO=y in final .config (this produces the '+')"
+                grep -E "^CONFIG_LOCALVERSION_AUTO" "$OUT/.config"
+                exit 1
+              fi
+              echo "CONFIG_LOCALVERSION_AUTO is off"
+              echo "--- predicted release string ---"
+              # 'make kernelrelease' prints the string plus "make: Leaving directory ..."
+              # noise; take the last line that looks like a version string.
+              REL=$(make -C $K O=$OUT EXTRAVERSION=-android15-8 LOCALVERSION= kernelrelease 2>/dev/null \
+                    | grep -E '^[0-9]+\.[0-9]+' | tail -1)
               echo "release = '$REL'"
               if [ -z "$REL" ]; then
-                echo "ERROR: make kernelrelease returned nothing"
+                echo "ERROR: make kernelrelease produced no version string"
+                make -C $K O=$OUT EXTRAVERSION=-android15-8 LOCALVERSION= kernelrelease 2>&1 | tail -20
                 exit 1
               fi
               case "$REL" in
