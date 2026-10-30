@@ -50,13 +50,15 @@ on:
 
 concurrency:
   group: ace5pro-b16-${{ github.ref }}
-  cancel-in-progress: false
+  # a queued run that never gets a runner blocks the next attempt, so let a new
+  # run take over instead of waiting for the old one to time out
+  cancel-in-progress: true
 
 jobs:
   build:
-    # ubuntu-22.04 has a shrinking hosted pool and can queue for 20+ minutes;
-    # 24.04 is the current default and gets scheduled immediately.
-    runs-on: ubuntu-24.04
+    # ubuntu-22.04 / 24.04 have been queueing for 20+ minutes on the hosted pool;
+    # ubuntu-latest is re-pointed by GitHub to whatever image has capacity.
+    runs-on: ubuntu-latest
     env:
       MANIFEST: oneplus_ace5_pro_b.xml
       MANIFEST_BRANCH: oneplus/sm8750
