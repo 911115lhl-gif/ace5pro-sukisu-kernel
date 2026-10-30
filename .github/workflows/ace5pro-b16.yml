@@ -310,6 +310,15 @@ jobs:
               make -C $K O=$OUT olddefconfig
               echo "--- resulting key configs ---"
               grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)=" "$OUT/.config" || true
+              # KSU must survive olddefconfig; if it vanished the Kconfig hook is missing
+              if ! grep -qE "^CONFIG_KSU=y" "$OUT/.config"; then
+                echo "ERROR: CONFIG_KSU did not survive olddefconfig - SukiSU Kconfig hook missing"
+                echo "--- where sources KSU Kconfig is referenced ---"
+                grep -rn "kernelsu\|KernelSU\|sukisu" $K/Kconfig $K/drivers/Kconfig 2>/dev/null | head -5
+                echo "--- KSU files copied into tree ---"
+                find $K -maxdepth 3 -iname '*kernelsu*' -o -maxdepth 3 -iname 'allowlist.c' 2>/dev/null | head -5
+                exit 1
+              fi
               make -C $K O=$OUT -j"$(nproc)" EXTRAVERSION=-android15-8 Image
               if [ -f "$OUT/arch/arm64/boot/Image" ]; then
                 echo "manual build OK: $OUT/arch/arm64/boot/Image"
@@ -333,24 +342,36 @@ jobs:
         run: |
           cd workspace/kernel_platform
           IMG=$(find . -type f -name Image -path '*arch/arm64/boot/Image' 2>/dev/null | head -1)
-          [ -z "$IMG" ] && IMG=$(find . -type f -name Image 2>/dev/null | head -1)
+          if [ -z "$IMG" ]; then IMG=$(find . -type f -name Image 2>/dev/null | head -1); fi
           echo "Image=$IMG"
           test -n "$IMG" && test -s "$IMG" || { echo "ERROR: Image missing"; exit 1; }
           grep -a "Linux version" "$IMG" | head -1
           grep -a "Linux version" "$IMG" | grep -q "${{ env.GKI_VER_EXPECT }}" || { echo "ERROR: not ${{ env.GKI_VER_EXPECT }}"; exit 1; }
           grep -a "Linux version" "$IMG" | grep -q "abogki500782043-4k" || { echo "ERROR: localversion mismatch"; exit 1; }
-          CFG=$(find . -type f -name .config 2>/dev/null | head -1)
+          CFG=""
+          for c in out_manual/.config dist/.config out/kernel-platform/.config; do
+            if [ -s "$c" ]; then CFG="$c"; break; fi
+          done
+          if [ -z "$CFG" ]; then CFG=$(find . -type f -name .config -not -path './msm-kernel/*' -not -path './common/*' 2>/dev/null | head -1); fi
           echo "config=$CFG"
           test -n "$CFG" || { echo "ERROR: .config not found"; exit 1; }
-          grep -qE "^CONFIG_KSU=y" "$CFG" || { echo "ERROR: KSU off"; exit 1; }
-          if [ "${{ inputs.ENABLE_KPM }}" = "true" ]; then
-            grep -qE "^CONFIG_KPM=y" "$CFG" || { echo "ERROR: KPM off"; exit 1; }
+          echo "--- key configs in $CFG ---"
+          grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)" "$CFG" || true
+          # KSU may be builtin (y) or module (m); both mean SukiSU is present
+          if ! grep -qE "^CONFIG_KSU=[ym]" "$CFG"; then
+            echo "ERROR: CONFIG_KSU not set (SukiSU missing from kernel)"
+            exit 1
           fi
-          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
-            grep -qE "^CONFIG_KSU_SUSFS=y" "$CFG" || { echo "ERROR: SUSFS off"; exit 1; }
+          if [ "${{ inputs.ENABLE_KPM }}" = "true" ] && ! grep -qE "^CONFIG_KPM=y" "$CFG"; then
+            echo "ERROR: CONFIG_KPM not enabled (KPM requested)"
+            exit 1
+          fi
+          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ] && ! grep -qE "^CONFIG_KSU_SUSFS=y" "$CFG"; then
+            echo "ERROR: CONFIG_KSU_SUSFS not enabled (SUSFS requested)"
+            exit 1
           fi
           grep -qE "^CONFIG_ARM64=y" "$CFG" || { echo "ERROR: not arm64"; exit 1; }
-          grep -qE "^CONFIG_ARM64_4K_PAGES=y" "$CFG" || { echo "ERROR: not 4k pages"; exit 1; }
+          grep -qE "^CONFIG_ARM64_4K_PAGES=y" "$CFG" || { echo "ERROR: not 4k pages - WOULD BRICK DEVICE"; exit 1; }
           echo "artifact verify ok"
 
       - name: package_ak3
@@ -358,17 +379,24 @@ jobs:
         run: |
           cd workspace/kernel_platform
           IMG=$(find . -type f -name Image -path '*arch/arm64/boot/Image' 2>/dev/null | head -1)
-          [ -z "$IMG" ] && IMG=$(find . -type f -name Image 2>/dev/null | head -1)
+          if [ -z "$IMG" ]; then IMG=$(find . -type f -name Image 2>/dev/null | head -1); fi
           echo "packaging: $IMG"
-          test -n "$IMG" || { echo "ERROR: no Image to package"; exit 1; }
+          test -n "$IMG" && test -s "$IMG" || { echo "ERROR: Image missing/empty"; exit 1; }
           rm -rf /tmp/ak3
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/ak3
           test -f /tmp/ak3/anykernel.sh || { echo "ERROR: anykernel.sh missing in template"; ls /tmp/ak3 | head; exit 1; }
           cp "$IMG" /tmp/ak3/Image
-          # A/B device: let AK3 pick the active slot; keep its stock block target
-          sed -i 's/^is_slot_device=.*/is_slot_device=1;/' /tmp/ak3/anykernel.sh
-          echo "--- anykernel.sh key lines ---"
-          grep -nE '^(block|is_slot_device|do\.device\.check|kernel\.string)=' /tmp/ak3/anykernel.sh || true
+          echo "--- template slot settings BEFORE ---"
+          grep -nE 'is_slot_device|^block=' /tmp/ak3/anykernel.sh || echo "(none found)"
+          # A/B device: force slot-aware flashing. If the key is absent, insert it.
+          if grep -qE '^is_slot_device=' /tmp/ak3/anykernel.sh; then
+            sed -i 's/^is_slot_device=.*/is_slot_device=1;/' /tmp/ak3/anykernel.sh
+          else
+            sed -i '/^## AnyKernel setup end/a is_slot_device=1;' /tmp/ak3/anykernel.sh
+          fi
+          echo "--- template slot settings AFTER ---"
+          grep -nE 'is_slot_device|^block=' /tmp/ak3/anykernel.sh || true
+          grep -qE '^is_slot_device=1' /tmp/ak3/anykernel.sh || { echo "ERROR: failed to set is_slot_device=1"; exit 1; }
           cd /tmp/ak3
           ZIP="AnyKernel3-sun-sm8750-b16-SukiSU-SUSFS-KPM-${SHORT_SHA}.zip"
           zip -r9 "$ZIP" . -x '.git/*'
