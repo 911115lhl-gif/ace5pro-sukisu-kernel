@@ -104,6 +104,22 @@ jobs:
           chmod +x /tmp/bazel
           mkdir -p workspace/kernel_platform/tools
           cp /tmp/bazel workspace/kernel_platform/tools/bazel
+          echo "=== bazel version ==="
+          /tmp/bazel --version
+          echo "=== kleaf expected bazel version (if declared) ==="
+          cd workspace/kernel_platform
+          # kleaf declares its supported bazel version; dump every place that could hold it
+          for f in build/kernel/kleaf/impl/bazel_version.bzl \
+                   build/kernel/kleaf/constants.bzl \
+                   build/kernel/kleaf/bazel.WORKSPACE \
+                   .bazelversion build/kernel/kleaf/.bazelversion; do
+            if [ -f "$f" ]; then
+              echo "--- $f ---"
+              grep -inE 'bazel|version|[0-9]+\.[0-9]+' "$f" | head -20
+            fi
+          done
+          echo "=== MODULE.bazel symlink target ==="
+          ls -l MODULE.bazel 2>/dev/null || echo "no MODULE.bazel"
 
       - name: apply_sukisu
         run: |
@@ -173,15 +189,25 @@ jobs:
           done
           echo "=== all external dirs ==="
           ls external/ 2>/dev/null | head -40
-          echo "=== kleaf uses bzlmod (MODULE.bazel + local_path_override) ==="
-          # bazel 8 requires bazel_dep for every local_path_override target.
-          # kleaf's MODULE.bazel overrides apple_support without declaring bazel_dep,
-          # so append the missing declaration to the root module.
-          if ! grep -q 'name = "apple_support"' MODULE.bazel 2>/dev/null; then
-            echo 'bazel_dep(name = "apple_support", version = "1.0.0")' >> MODULE.bazel
-            echo "appended bazel_dep apple_support"
+          echo "=== kleaf uses bzlmod (MODULE.bazel is a symlink to bzlmod/bazel.MODULE.bazel) ==="
+          MODFILE="build/kernel/kleaf/bzlmod/bazel.MODULE.bazel"
+          echo "--- symlink target ---"
+          ls -l MODULE.bazel
+          echo "--- before: grep apple_support ---"
+          grep -n 'apple_support' "$MODFILE"
+          # bazel 8 needs bazel_dep for each local_path_override; put it BEFORE any override.
+          # Our own marker line makes this idempotent.
+          if ! grep -q 'ACE5PRO_PATCHED' "$MODFILE"; then
+            printf '%s\n%s\n\n' \
+              'bazel_dep(name = "apple_support", version = "1.0.0")  # ACE5PRO_PATCHED' \
+              'bazel_dep(name = "rules_java", version = "7.12.2")  # ACE5PRO_PATCHED' \
+              > /tmp/dep_head.txt
+            cat /tmp/dep_head.txt "$MODFILE" > /tmp/module.new
+            mv /tmp/module.new "$MODFILE"
+            echo "prepended bazel_dep lines"
           fi
-          echo "--- MODULE.bazel tail ---"; tail -5 MODULE.bazel
+          echo "--- after: head -8 ---"
+          head -8 "$MODFILE"
           echo "--- .bazelrc (bzlmod mode) ---"
           echo 'common --enable_bzlmod' > .bazelrc
           echo "common --enable_bzlmod" > user.bazelrc
