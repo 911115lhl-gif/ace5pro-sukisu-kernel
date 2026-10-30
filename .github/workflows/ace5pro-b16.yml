@@ -61,7 +61,6 @@ jobs:
       TARGET: sun
       BUILD_VARIANT_NAME: ${{ inputs.BUILD_VARIANT }}
       GKI_VER_EXPECT: "6.6.118-android15-8"
-      BAZEL_VERSION: "8.1.1"
 
     steps:
       - name: guard_params
@@ -77,23 +76,49 @@ jobs:
 
       - name: install_repo
         run: |
+          # repo/git need an identity on a fresh runner, otherwise repo sync fails with
+          # "Please tell me who you are".
+          git config --global user.name "ci-builder" || true
+          git config --global user.email "ci-builder@localhost" || true
+          git config --global --add safe.directory '*' || true
           mkdir -p "$HOME/bin"
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
           chmod a+x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "--- disk before cleanup ---"
+          df -h / | tail -1
+
+      - name: free_disk_space
+        run: |
+          echo "=== reclaiming runner disk (this manifest is large: prebuilts + vendor tree) ==="
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo rm -rf /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean || true
+          docker system prune -af 2>/dev/null || true
+          echo "--- disk after cleanup ---"
+          df -h / | tail -1
+          FREE_G=$(df -Pk / | awk 'NR==2 {print int($4/1024/1024)}')
+          echo "free=${FREE_G}G"
+          if [ "$FREE_G" -lt 12 ]; then echo "WARNING: less than 12G free, repo sync may fail"; fi
 
       - name: repo_sync
         run: |
           mkdir -p workspace && cd workspace
           repo init -u https://github.com/OnePlusOSS/kernel_manifest.git \
                     -b "$MANIFEST_BRANCH" -m "$MANIFEST" --depth=1
+          ok=0
           for i in 1 2 3; do
             echo "repo sync attempt $i"
-            repo sync -c -j"$(nproc)" --fail-fast && break
+            if repo sync -c -j"$(nproc)" --fail-fast --force-sync; then
+              ok=1
+              break
+            fi
             echo "sync failed, retry in 5s"
             sleep 5
-            [ "$i" = "3" ] && exit 1
           done
+          if [ "$ok" != "1" ]; then echo "ERROR: repo sync failed after 3 attempts"; exit 1; fi
+          echo "--- disk after sync ---"
+          df -h / | tail -1
           grep -q "SUBLEVEL = 118" kernel_platform/common/Makefile || { echo "ERROR: common not 6.6.118"; exit 1; }
           grep -q "SUBLEVEL = 118" kernel_platform/msm-kernel/Makefile || { echo "ERROR: msm-kernel not 6.6.118"; exit 1; }
           echo "source is 6.6.118 ok"
@@ -119,7 +144,7 @@ jobs:
           echo "sukisu integrated ok"
 
       - name: apply_susfs
-        if: ${{ inputs.ENABLE_SUSFS }}
+        if: ${{ inputs.ENABLE_SUSFS == true }}
         run: |
           git clone --depth=1 -b gki-android15-6.6 https://github.com/ShirkNeko/susfs4ksu.git /tmp/susfs
           cd workspace/kernel_platform/msm-kernel
@@ -152,15 +177,30 @@ jobs:
         run: |
           cd workspace/kernel_platform/msm-kernel
           CFG=arch/arm64/configs/vendor/sun_perf.config
+          test -f "$CFG" || { echo "ERROR: $CFG not found"; ls arch/arm64/configs/vendor/ | head -20; exit 1; }
           echo "" >> "$CFG"
+          echo "# ==== injected by ace5pro workflow ====" >> "$CFG"
           echo "CONFIG_KSU=y" >> "$CFG"
-          echo "CONFIG_KPM=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS=y" >> "$CFG"
+          if [ "${{ inputs.ENABLE_KPM }}" = "true" ]; then
+            echo "CONFIG_KPM=y" >> "$CFG"
+          else
+            echo "# CONFIG_KPM is not set" >> "$CFG"
+          fi
+          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
+            echo "CONFIG_KSU_SUSFS=y" >> "$CFG"
+          else
+            echo "# CONFIG_KSU_SUSFS is not set" >> "$CFG"
+          fi
           echo "CONFIG_KALLSYMS_ALL=y" >> "$CFG"
+          # device ships a 4K-page GKI kernel; stock vendor_dlkm modules are 4K
+          echo "CONFIG_ARM64_4K_PAGES=y" >> "$CFG"
+          echo "# CONFIG_ARM64_16K_PAGES is not set" >> "$CFG"
+          echo "# CONFIG_ARM64_64K_PAGES is not set" >> "$CFG"
+          # reproduce the stock release string so vendor modules load
           echo "CONFIG_LOCALVERSION_AUTO=n" >> "$CFG"
           echo "CONFIG_LOCALVERSION=\"${{ inputs.LOCALVERSION }}\"" >> "$CFG"
           echo "--- appended config ---"
-          tail -10 "$CFG"
+          tail -14 "$CFG"
 
       - name: build_kernel
         run: |
@@ -182,12 +222,12 @@ jobs:
           tail -12 msm-kernel/arch/arm64/configs/vendor/sun_perf.config
 
           BUILD_OK=0
-          if [ -f build/build.sh ]; then
-            echo "=== PATH 1: ACK wrapper build/build.sh (BUILD_CONFIG=msm-kernel/build.config.msm.sun) ==="
-            if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
-              echo "DRY_RUN: skip actual build"
-              BUILD_OK=1
-            else
+          if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
+            echo "=== DRY_RUN: discovery + patch checks only, no compile ==="
+            BUILD_OK=1
+          else
+            if [ -f build/build.sh ]; then
+              echo "=== PATH 1: ACK wrapper build/build.sh (BUILD_CONFIG=msm-kernel/build.config.msm.sun) ==="
               set +e
               ROOT_DIR=$PWD KERNEL_DIR=msm-kernel \
               BUILD_CONFIG=msm-kernel/build.config.msm.sun VARIANT="$BUILD_VARIANT_NAME" \
@@ -201,46 +241,56 @@ jobs:
                 echo "--- last 40 lines of log ---"
                 tail -40 /tmp/legacy_build.log
               fi
-            fi
-          fi
-
-          if [ "$BUILD_OK" = "0" ] && [ "${{ inputs.DRY_RUN }}" != "true" ]; then
-            echo "=== PATH 2: manual make (gki_defconfig + sun fragments) ==="
-            K=msm-kernel
-            CFGDIR=$K/arch/arm64/configs
-            OUT=$PWD/out_manual
-            CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
-            echo "clang: $CLANG_DIR"
-            if [ -z "$CLANG_DIR" ]; then echo "ERROR: no clang prebuilt"; exit 1; fi
-            export PATH="$CLANG_DIR/bin:$PATH"
-            export ARCH=arm64 LLVM=1 LLVM_IAS=1
-            rm -rf "$OUT" && mkdir -p "$OUT"
-            if [ ! -f "$CFGDIR/gki_defconfig" ]; then
-              echo "ERROR: $CFGDIR/gki_defconfig not found"
-              ls "$CFGDIR" | head -20
-              exit 1
-            fi
-            make -C $K O=$OUT gki_defconfig
-            FRAGS="$CFGDIR/vendor/sun_perf.config"
-            if [ -f "$CFGDIR/vendor/sun_oplus_common.config" ]; then
-              FRAGS="$FRAGS $CFGDIR/vendor/sun_oplus_common.config"
-            fi
-            echo "fragments: $FRAGS"
-            KCONFIG_CONFIG=$OUT/.config bash $K/scripts/kconfig/merge_config.sh -m $OUT/.config $FRAGS \
-              || { echo "ERROR: merge_config failed"; exit 1; }
-            make -C $K O=$OUT olddefconfig
-            make -C $K O=$OUT -j"$(nproc)" EXTRAVERSION=-android15-8 Image
-            if [ -f "$OUT/arch/arm64/boot/Image" ]; then
-              echo "manual build OK: $OUT/arch/arm64/boot/Image"
-              BUILD_OK=1
             else
-              echo "ERROR: manual build produced no Image"
-              exit 1
+              echo "PATH 1 not available (no build/build.sh)"
+            fi
+
+            if [ "$BUILD_OK" = "0" ]; then
+              echo "=== PATH 2: manual make (gki_defconfig + sun fragments) ==="
+              K=msm-kernel
+              CFGDIR=$K/arch/arm64/configs
+              OUT=$PWD/out_manual
+              CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
+              echo "clang: $CLANG_DIR"
+              if [ -z "$CLANG_DIR" ]; then echo "ERROR: no clang prebuilt"; exit 1; fi
+              export PATH="$CLANG_DIR/bin:$PATH"
+              export ARCH=arm64 LLVM=1 LLVM_IAS=1
+              rm -rf "$OUT" && mkdir -p "$OUT"
+              if [ ! -f "$CFGDIR/gki_defconfig" ]; then
+                echo "ERROR: $CFGDIR/gki_defconfig not found"
+                ls "$CFGDIR" | head -20
+                exit 1
+              fi
+              make -C $K O=$OUT gki_defconfig
+              test -s "$OUT/.config" || { echo "ERROR: gki_defconfig produced empty .config"; exit 1; }
+              FRAGS="$CFGDIR/vendor/sun_perf.config"
+              # only add fragments that actually have content (sun_oplus_common.config is 0 bytes)
+              if [ -s "$CFGDIR/vendor/sun_oplus_common.config" ]; then
+                FRAGS="$FRAGS $CFGDIR/vendor/sun_oplus_common.config"
+              else
+                echo "skip empty fragment sun_oplus_common.config"
+              fi
+              echo "fragments: $FRAGS"
+              test -f "$K/scripts/kconfig/merge_config.sh" || { echo "ERROR: merge_config.sh missing in $K/scripts/kconfig"; exit 1; }
+              # usage: merge_config.sh [opts] <base config> <fragment...>  -> writes KCONFIG_CONFIG
+              ( cd "$K" && KCONFIG_CONFIG="$OUT/.config" bash scripts/kconfig/merge_config.sh -m -r -y -O "$OUT" "$OUT/.config" $FRAGS ) \
+                || { echo "ERROR: merge_config failed"; exit 1; }
+              make -C $K O=$OUT olddefconfig
+              echo "--- resulting key configs ---"
+              grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)=" "$OUT/.config" || true
+              make -C $K O=$OUT -j"$(nproc)" EXTRAVERSION=-android15-8 Image
+              if [ -f "$OUT/arch/arm64/boot/Image" ]; then
+                echo "manual build OK: $OUT/arch/arm64/boot/Image"
+                BUILD_OK=1
+              else
+                echo "ERROR: manual build produced no Image"
+                exit 1
+              fi
             fi
           fi
 
           if [ "$BUILD_OK" = "1" ]; then
-            echo "=== build finished (BUILD_OK=1) ==="
+            echo "=== build stage finished (BUILD_OK=1) ==="
           else
             echo "ERROR: no build path succeeded"
             exit 1
@@ -261,8 +311,12 @@ jobs:
           echo "config=$CFG"
           test -n "$CFG" || { echo "ERROR: .config not found"; exit 1; }
           grep -qE "^CONFIG_KSU=y" "$CFG" || { echo "ERROR: KSU off"; exit 1; }
-          grep -qE "^CONFIG_KPM=y" "$CFG" || { echo "ERROR: KPM off"; exit 1; }
-          grep -qE "^CONFIG_KSU_SUSFS=y" "$CFG" || { echo "ERROR: SUSFS off"; exit 1; }
+          if [ "${{ inputs.ENABLE_KPM }}" = "true" ]; then
+            grep -qE "^CONFIG_KPM=y" "$CFG" || { echo "ERROR: KPM off"; exit 1; }
+          fi
+          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
+            grep -qE "^CONFIG_KSU_SUSFS=y" "$CFG" || { echo "ERROR: SUSFS off"; exit 1; }
+          fi
           grep -qE "^CONFIG_ARM64=y" "$CFG" || { echo "ERROR: not arm64"; exit 1; }
           grep -qE "^CONFIG_ARM64_4K_PAGES=y" "$CFG" || { echo "ERROR: not 4k pages"; exit 1; }
           echo "artifact verify ok"
@@ -274,15 +328,23 @@ jobs:
           IMG=$(find . -type f -name Image -path '*arch/arm64/boot/Image' 2>/dev/null | head -1)
           [ -z "$IMG" ] && IMG=$(find . -type f -name Image 2>/dev/null | head -1)
           echo "packaging: $IMG"
+          test -n "$IMG" || { echo "ERROR: no Image to package"; exit 1; }
+          rm -rf /tmp/ak3
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/ak3
+          test -f /tmp/ak3/anykernel.sh || { echo "ERROR: anykernel.sh missing in template"; ls /tmp/ak3 | head; exit 1; }
           cp "$IMG" /tmp/ak3/Image
+          # A/B device: let AK3 pick the active slot; keep its stock block target
           sed -i 's/^is_slot_device=.*/is_slot_device=1;/' /tmp/ak3/anykernel.sh
-          sed -i 's|^block=.*|block=auto;|' /tmp/ak3/anykernel.sh
+          echo "--- anykernel.sh key lines ---"
+          grep -nE '^(block|is_slot_device|do\.device\.check|kernel\.string)=' /tmp/ak3/anykernel.sh || true
           cd /tmp/ak3
           ZIP="AnyKernel3-sun-sm8750-b16-SukiSU-SUSFS-KPM-${SHORT_SHA}.zip"
           zip -r9 "$ZIP" . -x '.git/*'
           mkdir -p /tmp/artifact && cp "$ZIP" /tmp/artifact/
+          echo "--- zip contents ---"
           unzip -l "/tmp/artifact/$ZIP" | head -30
+          # sanity: the kernel must be inside the zip
+          unzip -l "/tmp/artifact/$ZIP" | grep -q 'Image' || { echo "ERROR: Image not in zip"; exit 1; }
 
       - name: upload_artifact
         if: ${{ !inputs.DRY_RUN }}
