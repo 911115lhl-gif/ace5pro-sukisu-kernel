@@ -225,37 +225,28 @@ jobs:
 
       - name: strip_dirty_suffix
         run: |
-          # A dirty tree makes scripts/setlocalversion append "+" (and "-dirty"),
-          # which changes the release string and breaks vermagic matching against the
-          # stock vendor_dlkm modules -> unbootable. CONFIG_LOCALVERSION in .config
-          # already carries the exact stock suffix, so the scm suffix must be empty.
+          # Root cause of the trailing "+": scripts/setlocalversion ends with
+          #
+          #   elif [ "${LOCALVERSION+set}" != "set" ]; then
+          #       echo "+"            <-- this is the '+' we saw
+          #   ...
+          #   echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"
+          #
+          # So the '+' appears when LOCALVERSION is UNSET in the make environment.
+          # We must (a) keep setlocalversion intact (it produces the whole release
+          # string, including KERNELVERSION) and (b) explicitly pass LOCALVERSION=""
+          # to make so the UNSET branch is never taken.
           KDIR="workspace/kernel_platform/msm-kernel"
           SL="$KDIR/scripts/setlocalversion"
           test -f "$SL" || { echo "ERROR: $SL missing"; exit 1; }
 
-          echo "=== original setlocalversion (why + appears) ==="
-          grep -n 'dirty\|localver\|scm_version\|printf' "$SL" | head -20 || true
-
-          cp "$SL" /tmp/setlocalversion.orig
-          # Hard replace: emit nothing at all. CONFIG_LOCALVERSION supplies the suffix.
-          printf '%s\n' \
-            '#!/bin/sh' \
-            '# Replaced by ace5pro workflow: emit no scm suffix so the release string' \
-            '# matches the stock kernel exactly (CONFIG_LOCALVERSION provides the suffix).' \
-            'exit 0' > "$SL"
-          chmod +x "$SL"
-
-          echo "=== new setlocalversion ==="
-          cat "$SL"
-          echo "=== smoke test: must print an empty line ==="
-          ( cd "$KDIR" && sh scripts/setlocalversion . ) | tee /tmp/slv.out
-          if [ -s /tmp/slv.out ] && [ -n "$(cat /tmp/slv.out)" ]; then
-            echo "ERROR: setlocalversion still emits a suffix:"
-            cat /tmp/slv.out
-            cp /tmp/setlocalversion.orig "$SL"
-            exit 1
+          echo "=== confirm the '+' branch exists (do NOT modify the script) ==="
+          grep -n -A2 'LOCALVERSION+set' "$SL" || true
+          grep -n 'echo "+"' "$SL" || true
+          if ! grep -q 'LOCALVERSION+set' "$SL"; then
+            echo "WARNING: expected LOCALVERSION+set logic not found; check kernel version"
           fi
-          echo "OK: setlocalversion emits nothing"
+          echo "setlocalversion left untouched; LOCALVERSION will be forced to empty at make time"
 
       - name: build_kernel
         run: |
@@ -393,8 +384,14 @@ jobs:
               fi
               # EXTRAVERSION gives -android15-8; CONFIG_LOCALVERSION (in .config) gives
               # the g...-abogki... suffix; CONFIG_LOCALVERSION_AUTO=n stops setlocalversion
-              # from appending -dirty.
-              make -C $K O=$OUT -j"$(nproc)" EXTRAVERSION=-android15-8 Image
+              # LOCALVERSION="" must be passed explicitly: setlocalversion emits '+'
+              # only when LOCALVERSION is unset in the environment.
+              # Release string target:
+              #   VERSION.PATCHLEVEL.SUBLEVEL + EXTRAVERSION + CONFIG_LOCALVERSION
+              #   = 6.6.118 + -android15-8 + -g93e223c276e7-abogki500782043-4k
+              echo "--- pre-build sanity: what will the release string be? ---"
+              grep -E "^CONFIG_LOCALVERSION" "$OUT/.config" || true
+              make -C $K O=$OUT -j"$(nproc)" EXTRAVERSION=-android15-8 LOCALVERSION= Image
               if [ -f "$OUT/arch/arm64/boot/Image" ]; then
                 echo "manual build OK: $OUT/arch/arm64/boot/Image"
                 echo "--- built release string ---"
