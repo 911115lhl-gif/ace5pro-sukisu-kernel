@@ -1,2 +1,4 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Never convert line endings: GitHub Actions shell blocks require LF
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
