@@ -161,10 +161,15 @@ jobs:
         run: |
           cd workspace/kernel_platform
           echo "TARGET=$TARGET VARIANT=$BUILD_VARIANT_NAME"
+          # kleaf is WORKSPACE-mode; disable bzlmod globally via a user bazelrc
+          printf 'common --noenable_bzlmod\n' > user.bazelrc
+          echo "--- user.bazelrc ---"
+          cat user.bazelrc
+          export BAZEL_ARGS="--noenable_bzlmod"
           if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
-            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" --dry-run
+            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" --dry-run $BAZEL_ARGS
           else
-            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME"
+            python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" $BAZEL_ARGS
           fi
 
       - name: verify_artifact
