@@ -572,12 +572,12 @@ jobs:
           cp "$IMG" /tmp/ak3/Image
           AK=/tmp/ak3/anykernel.sh
           echo "--- template vars BEFORE ---"
-          grep -nE 'IS_SLOT_DEVICE|is_slot_device|^BLOCK=|^block=' "$AK" || echo "(none found)"
+          grep -nE 'IS_SLOT_DEVICE|BLOCK=|do\.devicecheck|device\.name1|kernel\.string' "$AK" || echo "(none found)"
 
           # AK3 uses UPPERCASE shell variables: BLOCK=... and IS_SLOT_DEVICE=0/1.
-          # The shipped template points BLOCK at an OMAP device path, so it must be
-          # replaced with the generic by-name/boot path for this Qualcomm A/B device,
-          # and IS_SLOT_DEVICE must be 1 so the script follows the active slot.
+          # The shipped template targets an OMAP device (maguro/toro/...), so BLOCK,
+          # IS_SLOT_DEVICE and the device-check list all have to be replaced or the
+          # package refuses to flash on this Qualcomm A/B phone.
           if grep -qE '^[[:space:]]*IS_SLOT_DEVICE=' "$AK"; then
             sed -i 's|^[[:space:]]*IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' "$AK"
           else
@@ -589,14 +589,57 @@ jobs:
             echo "BLOCK=/dev/block/bootdevice/by-name/boot;" >> "$AK"
           fi
 
+          # device check: keep it enabled but point it at this device (codename sun /
+          # model PKR110). Easier and safer than disabling the guard entirely.
+          if grep -qE '^device\.name1=' "$AK"; then
+            sed -i 's|^device\.name1=.*|device.name1=sun|' "$AK"
+          fi
+          if grep -qE '^device\.name2=' "$AK"; then
+            sed -i 's|^device\.name2=.*|device.name2=PKR110|' "$AK"
+          fi
+          if grep -qE '^device\.name3=' "$AK"; then
+            sed -i 's|^device\.name3=.*|device.name3=OP60EBL1|' "$AK"
+          fi
+          # clear the remaining template entries so only our names are matched
+          for n in 4 5; do
+            grep -qE "^device\.name$n=" "$AK" && sed -i "s|^device\.name$n=.*|device.name$n=|" "$AK"
+          done
+
+          # kernel.string shows up in the recovery/flash UI - make it identify the build
+          if grep -qE '^kernel\.string=' "$AK"; then
+            sed -i "s|^kernel\.string=.*|kernel.string=Ace5Pro PKR110 6.6.118 SukiSU+SUSFS+KPM (${SHORT_SHA})|" "$AK"
+          fi
+
           echo "--- template vars AFTER ---"
-          grep -nE 'IS_SLOT_DEVICE|BLOCK=' "$AK" || true
+          grep -nE 'IS_SLOT_DEVICE|BLOCK=|do\.devicecheck|device\.name[1-5]|kernel\.string' "$AK" || true
           grep -qE '^[[:space:]]*IS_SLOT_DEVICE=1' "$AK" || { echo "ERROR: IS_SLOT_DEVICE not set to 1"; exit 1; }
           grep -q 'by-name/boot' "$AK" || { echo "ERROR: BLOCK not pointed at by-name/boot"; exit 1; }
+          grep -qE '^device\.name1=sun$' "$AK" || { echo "ERROR: device.name1 not set to sun"; exit 1; }
 
           # Do NOT touch the ramdisk: stock boot keeps its ramdisk, we only swap the kernel.
-          echo "--- keep dump_boot/write_boot (ramdisk preserving) ---"
-          grep -nE '^(dump_boot|write_boot|flash_boot)' "$AK" || true
+          echo "--- ramdisk handling (must keep dump_boot/write_boot) ---"
+          grep -nE '^(dump_boot|write_boot|flash_boot)' "$AK" || { echo "ERROR: dump_boot/write_boot missing"; exit 1; }
+
+          # The upstream template ships Galaxy Nexus (tuna) example operations between
+          # dump_boot and write_boot: replace_string init.rc, insert_line init.tuna.rc,
+          # patch_fstab fstab.tuna. Those files do not exist on this device and would
+          # fail or corrupt the ramdisk, so comment every one of them out.
+          echo "--- neutralising tuna-only ramdisk tweaks ---"
+          sed -i -E 's|^([[:space:]]*)(backup_file init\.rc;)|#\1\2|' "$AK"
+          sed -i -E 's|^([[:space:]]*)(replace_string init\.rc)|#\1\2|' "$AK"
+          sed -i -E 's|^([[:space:]]*)(backup_file init\.tuna\.rc;)|#\1\2|' "$AK"
+          sed -i -E 's|^([[:space:]]*)(insert_line init\.tuna\.rc)|#\1\2|' "$AK"
+          sed -i -E 's|^([[:space:]]*)(append_file init\.tuna\.rc)|#\1\2|' "$AK"
+          sed -i -E 's|^([[:space:]]*)(backup_file fstab\.tuna;)|#\1\2|' "$AK"
+          sed -i -E 's|^([[:space:]]*)(patch_fstab fstab\.tuna)|#\1\2|' "$AK"
+          sed -i -E 's|^([[:space:]]*)(append_file fstab\.tuna)|#\1\2|' "$AK"
+          echo "--- verify no active tuna operations remain ---"
+          if grep -nE '^[[:space:]]*(replace_string init\.rc|insert_line init\.tuna|patch_fstab fstab\.tuna|append_file (init|fstab)\.tuna|backup_file (init\.rc|init\.tuna\.rc|fstab\.tuna))' "$AK"; then
+            echo "ERROR: tuna operations still active"
+            exit 1
+          fi
+          echo "OK: only dump_boot / write_boot remain active"
+          sed -n '40,60p' "$AK"
 
           cd /tmp/ak3
           ZIP="AnyKernel3-sun-sm8750-b16-SukiSU-SUSFS-KPM-${SHORT_SHA}.zip"
