@@ -681,7 +681,7 @@ jobs:
           unzip -l "/tmp/artifact/$ZIP" | grep -q 'anykernel.sh' || { echo "ERROR: anykernel.sh not in zip"; exit 1; }
           unzip -l "/tmp/artifact/$ZIP" | grep -q 'META-INF/com/google/android/update-binary' || { echo "ERROR: update-binary not in zip"; exit 1; }
           # no nested archive
-          if unzip -l "/tmp/artifact/$ZIP" | grep -qE '\.zip$'; then
+          if unzip -Z1 "/tmp/artifact/$ZIP" | grep -qE '(^|/)[^/]+\.zip$'; then
             echo "ERROR: nested zip inside the package"
             exit 1
           fi
