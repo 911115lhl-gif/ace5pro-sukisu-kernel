@@ -142,7 +142,17 @@ jobs:
 
       - name: apply_sukisu
         run: |
-          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu
+          # SukiSU-Ultra's `builtin` branch ships SUSFS support in-tree:
+          #   kernel/Kconfig defines KSU, KPM, KSU_SUSFS and all KSU_SUSFS_* options
+          #   (main branch has NO KSU_SUSFS at all), so no KernelSU-side SUSFS patch
+          #   is needed or wanted - applying one corrupts the refactored sources
+          #   (this is what produced the ksu_late_loaded / ksu_lsm_hook_* errors).
+          git clone --depth=1 -b builtin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu
+          echo "--- confirm SUSFS symbols exist in the cloned branch ---"
+          grep -c "config KSU_SUSFS" /tmp/sukisu/kernel/Kconfig || true
+          grep -q "config KSU_SUSFS" /tmp/sukisu/kernel/Kconfig || { echo "ERROR: builtin branch lacks KSU_SUSFS"; exit 1; }
+          grep -q "config KPM" /tmp/sukisu/kernel/Kconfig || { echo "ERROR: builtin branch lacks KPM"; exit 1; }
+          echo "builtin branch has KSU + KPM + KSU_SUSFS"
           cd workspace/kernel_platform/msm-kernel
           bash /tmp/sukisu/kernel/setup.sh || { echo "ERROR: sukisu setup.sh failed"; exit 1; }
           find . -name 'allowlist.c' | grep -q . || { echo "ERROR: allowlist.c not found, sukisu kernel not integrated"; exit 1; }
@@ -151,78 +161,41 @@ jobs:
       - name: apply_susfs
         if: ${{ inputs.ENABLE_SUSFS == true }}
         run: |
-          # Follows the official susfs4ksu README "Apply SUSFS patches" steps 3-10:
-          #   3/6 copy patch+fs+include into tree, 7 patch KernelSU (this is what
-          #   defines CONFIG_KSU_SUSFS in KernelSU/kernel/Kconfig), 8 patch kernel.
+          # SukiSU's `builtin` branch already carries the KernelSU-side SUSFS glue
+          # (Kconfig + kernel/extension/susfs_extension.c). Only the KERNEL side has
+          # to be patched:
+          #   1) copy fs/susfs.c and include/linux/susfs*.h into the kernel tree
+          #   2) apply 50_add_susfs_in_gki-android15-6.6.patch (hook points)
+          #      -> also adds fs/Makefile's obj-$(CONFIG_KSU_SUSFS) += susfs.o
+          # Do NOT apply 10_enable_susfs_for_ksu.patch: it targets upstream KernelSU
+          # and would corrupt SukiSU's refactored sources.
           git clone --depth=1 -b gki-android15-6.6 https://github.com/ShirkNeko/susfs4ksu.git /tmp/susfs
           KDIR="workspace/kernel_platform/msm-kernel"
           ls /tmp/susfs/kernel_patches
 
-          echo "=== step 5/6: copy fs/ and include/linux/ sources into kernel tree ==="
+          echo "=== copy fs/ and include/linux/ sources into kernel tree ==="
           cp -v /tmp/susfs/kernel_patches/fs/* "$KDIR/fs/" || { echo "ERROR: copy fs failed"; exit 1; }
           cp -v /tmp/susfs/kernel_patches/include/linux/* "$KDIR/include/linux/" || { echo "ERROR: copy include failed"; exit 1; }
           ls -l "$KDIR/fs/susfs.c" "$KDIR/include/linux/susfs.h" "$KDIR/include/linux/susfs_def.h" || { echo "ERROR: susfs sources missing"; exit 1; }
 
-          echo "=== step 7: patch KernelSU with 10_enable_susfs_for_ksu.patch ==="
-          # The patch uses paths like a/kernel/Kconfig and a/kernel/feature/*, so it must
-          # be applied at the KernelSU repo root (the dir that contains kernel/).
-          # allowlist.c lives at KernelSU/kernel/policy/allowlist.c, so the repo root is
-          # TWO levels above its directory.
-          KSU_ALLOWLIST=$(find "$KDIR" -name 'allowlist.c' -print -quit 2>/dev/null)
-          echo "allowlist.c = $KSU_ALLOWLIST"
-          if [ -z "$KSU_ALLOWLIST" ]; then
-            echo "ERROR: allowlist.c not found; SukiSU not integrated?"
-            find "$KDIR" -maxdepth 2 -iname '*kernelsu*' -o -maxdepth 2 -iname 'KernelSU' 2>/dev/null | head
-            exit 1
-          fi
-          KSU_ROOT=$(cd "$(dirname "$KSU_ALLOWLIST")/../.." && pwd)
-          echo "KSU_ROOT=$KSU_ROOT"
-          # sanity: the repo root must contain kernel/Kconfig
-          if [ ! -f "$KSU_ROOT/kernel/Kconfig" ]; then
-            echo "ERROR: $KSU_ROOT/kernel/Kconfig missing -> wrong KSU_ROOT"
-            echo "--- looking for kernel/Kconfig around the allowlist location ---"
-            find "$(dirname "$KSU_ALLOWLIST")/../.." -maxdepth 3 -name Kconfig 2>/dev/null | head -10
-            exit 1
-          fi
-          echo "--- before patch: does KSU_SUSFS already exist? ---"
-          grep -n "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" || echo "(not present yet, will be added by patch)"
-          cp -v /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch "$KSU_ROOT/" || { echo "ERROR: copy ksu patch"; exit 1; }
-          ( cd "$KSU_ROOT" && patch -p1 --forward --no-backup-if-mismatch < 10_enable_susfs_for_ksu.patch ) || echo "WARN: KernelSU patch had rejects (see .rej below)"
-
-          echo "--- did KSU_SUSFS land in KernelSU Kconfig? ---"
-          grep -n "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" || {
-            echo "ERROR: KSU_SUSFS not in $KSU_ROOT/kernel/Kconfig"
-            echo "--- .rej files under KSU_ROOT ---"
-            find "$KSU_ROOT" -name '*.rej' 2>/dev/null | head -20
-            exit 1
-          }
-
-          echo "=== make sure the kernel tree sources KernelSU's Kconfig ==="
-          # find where CONFIG_KSU gets declared and confirm the Kconfig chain reaches it
-          grep -rn "KernelSU\|kernelsu" "$KDIR/Kbuild" "$KDIR/Kconfig" "$KDIR/drivers/Kconfig" 2>/dev/null | head -10 || true
-
-          echo "=== step 8: patch kernel tree with 50_add_susfs patch ==="
+          echo "=== apply kernel hook patch (50_add_susfs_in_gki-android15-6.6.patch) ==="
           P50=$(ls /tmp/susfs/kernel_patches/50_add_susfs_in_gki-android15-*.patch 2>/dev/null | head -1)
           echo "patch: $P50"
-          ( cd "$KDIR" && git apply -p1 --reject "$P50" ) && echo "kernel patch applied clean" || echo "WARN: kernel patch had rejects"
+          test -n "$P50" || { echo "ERROR: 50_add_susfs patch not found"; ls /tmp/susfs/kernel_patches; exit 1; }
+          ( cd "$KDIR" && git apply -p1 --reject "$P50" ) && echo "kernel patch applied clean" || echo "WARN: kernel patch had rejects (listed below)"
 
           echo "=== rejects present? ==="
-          find "$KDIR" "$KSU_ROOT" -name '*.rej' 2>/dev/null | head -40 || true
+          find "$KDIR" -name '*.rej' 2>/dev/null | head -40 || true
 
-          echo "=== step 10: confirm the symbol is reachable from the kernel Kconfig chain ==="
-          grep -n "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" | head -3
-          # the kernel tree must source KernelSU's Kconfig for the symbol to exist
-          echo "--- who sources KernelSU's Kconfig? ---"
-          grep -rn "KernelSU" "$KDIR/Kbuild" "$KDIR/Kconfig" "$KDIR/drivers/Kconfig" 2>/dev/null | head -5 || true
-          if ! grep -rqn "KernelSU" "$KDIR/Kbuild" "$KDIR/Kconfig" "$KDIR/drivers/Kconfig" 2>/dev/null; then
-            echo "WARNING: no Kconfig source line found for KernelSU; CONFIG_KSU may not be selectable"
-          fi
-          echo "=== verify kernel hooks ==="
-          grep -q "susfs" "$KDIR/fs/namei.c" && echo "OK namei.c" || { echo "ERROR: fs/namei.c has no susfs hook"; exit 1; }
-          grep -q "susfs" "$KDIR/fs/namespace.c" && echo "OK namespace.c" || { echo "ERROR: fs/namespace.c has no susfs hook"; exit 1; }
-          echo "=== kernel_patches/KernelSU patched files ==="
-          ( cd "$KSU_ROOT" && git status --porcelain 2>/dev/null | head -20 ) || true
-          echo "susfs integrated ok"
+          echo "=== verify kernel-side wiring ==="
+          grep -q "susfs" "$KDIR/fs/namei.c" && echo "OK fs/namei.c hook" || { echo "ERROR: fs/namei.c has no susfs hook"; exit 1; }
+          grep -q "susfs" "$KDIR/fs/namespace.c" && echo "OK fs/namespace.c hook" || { echo "ERROR: fs/namespace.c has no susfs hook"; exit 1; }
+          grep -qE "CONFIG_KSU_SUSFS" "$KDIR/fs/Makefile" && echo "OK fs/Makefile builds susfs.o" || { echo "ERROR: fs/Makefile lacks CONFIG_KSU_SUSFS rule"; exit 1; }
+
+          echo "=== confirm SukiSU side provides the SUSFS glue (no patch needed) ==="
+          KSU_EXT=$(find "$KDIR" -path '*kernelsu*' -name 'susfs_extension.c' -print -quit 2>/dev/null)
+          if [ -n "$KSU_EXT" ]; then echo "OK $KSU_EXT"; else echo "WARNING: susfs_extension.c not found in tree"; fi
+          echo "susfs integrated ok (kernel-side only)"
 
       - name: write_kernel_config
         run: |
