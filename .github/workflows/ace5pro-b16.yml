@@ -300,12 +300,14 @@ jobs:
               fi
               make -C $K O=$OUT gki_defconfig
               test -s "$OUT/.config" || { echo "ERROR: gki_defconfig produced empty .config"; exit 1; }
-              # absolute paths: merge_config.sh is run from inside $K, so relative
-              # paths containing the $K prefix would be doubled.
+              # NOTE: $PWD changes after cd, so freeze absolute paths into variables first.
+              PLAT="$PWD"
+              KDIR="$PLAT/$K"
               BASE_CFG="$OUT/.config"
-              FRAGS="$PWD/$CFGDIR/vendor/sun_perf.config"
-              if [ -s "$PWD/$CFGDIR/vendor/sun_oplus_common.config" ]; then
-                FRAGS="$FRAGS $PWD/$CFGDIR/vendor/sun_oplus_common.config"
+              MERGE="$KDIR/scripts/kconfig/merge_config.sh"
+              FRAGS="$KDIR/arch/arm64/configs/vendor/sun_perf.config"
+              if [ -s "$KDIR/arch/arm64/configs/vendor/sun_oplus_common.config" ]; then
+                FRAGS="$FRAGS $KDIR/arch/arm64/configs/vendor/sun_oplus_common.config"
               else
                 echo "skip empty fragment sun_oplus_common.config"
               fi
@@ -314,11 +316,17 @@ jobs:
               done
               echo "base: $BASE_CFG"
               echo "fragments: $FRAGS"
-              test -f "$PWD/$K/scripts/kconfig/merge_config.sh" || { echo "ERROR: merge_config.sh missing"; exit 1; }
+              echo "merge script: $MERGE"
+              test -f "$BASE_CFG" || { echo "ERROR: base config missing: $BASE_CFG"; exit 1; }
+              test -f "$MERGE" || { echo "ERROR: merge_config.sh missing: $MERGE"; exit 1; }
               # merge_config.sh: with KCONFIG_CONFIG set, -O is ignored (it is only a
               # fallback for deriving KCONFIG_CONFIG), so we omit it. -m = don't run make.
-              ( cd "$PWD/$K" && KCONFIG_CONFIG="$BASE_CFG" bash "$PWD/$K/scripts/kconfig/merge_config.sh" -m -r -y "$BASE_CFG" $FRAGS ) \
+              # Run it from the kernel dir so its internal relative paths resolve; the
+              # script and config paths are pre-frozen absolute values.
+              ( cd "$KDIR" && KCONFIG_CONFIG="$BASE_CFG" bash "$MERGE" -m -r -y "$BASE_CFG" $FRAGS ) \
                 || { echo "ERROR: merge_config failed"; exit 1; }
+              echo "--- merged .config size ---"
+              wc -l "$BASE_CFG" || true
               make -C $K O=$OUT olddefconfig
               echo "--- resulting key configs ---"
               grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)=" "$OUT/.config" || true
