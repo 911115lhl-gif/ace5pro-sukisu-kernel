@@ -265,15 +265,19 @@ jobs:
 
       - name: check_release_string_logic
         run: |
-          # scripts/setlocalversion ends with:
-          #   echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"
-          # With CONFIG_LOCALVERSION_AUTO=n it still appends the scm "-g<commit>" tail,
-          # which produced 6.6.118-android15-8-4k-g5e9ee92883e7 instead of the stock
-          # 6.6.118-android15-8-g93e223c276e7-abogki500782043-4k.
+          # Stock release string on this device:
+          #   6.6.118-android15-8-g93e223c276e7-abogki500782043-4k
+          #   = VERSION.PATCHLEVEL.SUBLEVEL(6.6.118) + EXTRAVERSION(-android15-8)
+          #     + the rest, which gki_defconfig does NOT provide (it ships "-4k").
           #
-          # Therefore: CONFIG_LOCALVERSION carries the full stock suffix, and
-          # filechk_kernel.release must emit nothing extra. We rewrite the hook so it
-          # still prints KERNELVERSION (needed by kbuild) but adds no scm suffix.
+          # scripts/setlocalversion builds the string from KERNELVERSION plus
+          # include/config/auto.conf's CONFIG_LOCALVERSION plus an scm "-g<commit>"
+          # tail. Two problems:
+          #   1) auto.conf may still hold the pre-merge value ("-4k")
+          #   2) the scm tail appends this repo's commit hash, not the stock one
+          #
+          # So we pin the whole suffix directly in setlocalversion: it prints
+          # KERNELVERSION + the exact stock suffix and nothing else.
           KDIR="workspace/kernel_platform/msm-kernel"
           SL="$KDIR/scripts/setlocalversion"
           test -f "$SL" || { echo "ERROR: $SL missing"; exit 1; }
@@ -282,15 +286,10 @@ jobs:
           tail -25 "$SL"
 
           cp "$SL" /tmp/setlocalversion.orig
-          # Replace only the final echo line (line N of scripts/setlocalversion):
-          #   echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"
-          # with:
-          #   echo "${KERNELVERSION}${config_localversion}"
-          # so CONFIG_LOCALVERSION supplies the whole suffix and no scm tail is added.
-          BEFORE=$(grep -c '^echo "${KERNELVERSION}' "$SL" || true)
-          echo "matching echo lines found: $BEFORE"
-          sed -i 's|^echo "${KERNELVERSION}.*$|echo "${KERNELVERSION}${config_localversion}"|' "$SL"
-          AFTER=$(grep -c '^echo "${KERNELVERSION}${config_localversion}"' "$SL" || true)
+          SUFFIX='${{ inputs.LOCALVERSION }}'
+          echo "pinned suffix: $SUFFIX"
+          sed -i "s|^echo \"\${KERNELVERSION}.*\$|echo \"\${KERNELVERSION}\"\"$SUFFIX\"|" "$SL"
+          AFTER=$(grep -c "echo \"\${KERNELVERSION}\".*$SUFFIX" "$SL" || true)
           echo "patched echo lines: $AFTER"
           if [ "$AFTER" = "0" ]; then
             echo "ERROR: failed to patch setlocalversion final echo line"
