@@ -211,11 +211,18 @@ jobs:
             echo "# CONFIG_KPM is not set" >> "$CFG"
           fi
           if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
+            # SukiSU's builtin Kconfig gates KSU_SUSFS behind THREAD_INFO_IN_TASK.
+            # If that symbol is not y in the final .config, olddefconfig silently
+            # drops KSU_SUSFS and every KSU_SUSFS_* option with it.
+            echo "CONFIG_THREAD_INFO_IN_TASK=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CFG"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$CFG"
           else
@@ -398,7 +405,15 @@ jobs:
               wc -l "$BASE_CFG" || true
               make -C $K O=$OUT olddefconfig
               echo "--- resulting key configs ---"
-              grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)=" "$OUT/.config" || true
+              grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|THREAD_INFO_IN_TASK|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)=" "$OUT/.config" || true
+              echo "--- SUSFS dependency diagnostics ---"
+              for s in CONFIG_THREAD_INFO_IN_TASK CONFIG_KSU CONFIG_KSU_SUSFS; do
+                if grep -qE "^$s=y" "$OUT/.config"; then echo "  $s=y"
+                elif grep -qE "^$s=m" "$OUT/.config"; then echo "  $s=m"
+                else echo "  $s NOT SET"; fi
+              done
+              echo "--- where KSU_SUSFS is declared in the tree ---"
+              grep -rn "config KSU_SUSFS$" "$K" 2>/dev/null | head -3 || echo "  (not declared anywhere)"
               # KSU must survive olddefconfig; if it vanished the Kconfig hook is missing
               if ! grep -qE "^CONFIG_KSU=[ym]" "$OUT/.config"; then
                 echo "ERROR: CONFIG_KSU did not survive olddefconfig - SukiSU Kconfig hook missing"
@@ -408,6 +423,14 @@ jobs:
                 find $K -maxdepth 3 \( -iname '*kernelsu*' -o -iname 'allowlist.c' \) 2>/dev/null | head -5 || true
                 echo "--- what setup.sh actually did ---"
                 ls -la $K/KernelSU 2>/dev/null || echo "no $K/KernelSU dir"
+                exit 1
+              fi
+              if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ] && ! grep -qE "^CONFIG_KSU_SUSFS=y" "$OUT/.config"; then
+                echo "ERROR: CONFIG_KSU_SUSFS did not survive olddefconfig"
+                echo "--- is the builtin branch actually in use? (Kconfig tail) ---"
+                tail -20 "$K/drivers/kernelsu/Kconfig" 2>/dev/null || echo "no drivers/kernelsu/Kconfig"
+                echo "--- KSU_SUSFS as merged into .config before olddefconfig (fragment) ---"
+                grep -E "KSU_SUSFS" $K/arch/arm64/configs/vendor/sun_perf.config || true
                 exit 1
               fi
               # Release string target:
