@@ -253,7 +253,11 @@ jobs:
           echo "CONFIG_ARM64_4K_PAGES=y" >> "$CFG"
           echo "# CONFIG_ARM64_16K_PAGES is not set" >> "$CFG"
           echo "# CONFIG_ARM64_64K_PAGES is not set" >> "$CFG"
-          # reproduce the stock release string so vendor modules load
+          # Reproduce the exact stock release string. gki_defconfig ships
+          # CONFIG_LOCALVERSION="-4k" and scripts/setlocalversion appends
+          # "-g<commit>", producing 6.6.118-android15-8-4k-gXXXX. The stock value is
+          # 6.6.118-android15-8-g93e223c276e7-abogki500782043-4k, so CONFIG_LOCALVERSION
+          # carries the whole suffix and setlocalversion must add nothing.
           echo "CONFIG_LOCALVERSION_AUTO=n" >> "$CFG"
           echo "CONFIG_LOCALVERSION=\"${{ inputs.LOCALVERSION }}\"" >> "$CFG"
           echo "--- appended config ---"
@@ -261,28 +265,44 @@ jobs:
 
       - name: check_release_string_logic
         run: |
-          # Root cause of the trailing "+": scripts/setlocalversion ends with
-          #
-          #   elif [ "${LOCALVERSION+set}" != "set" ]; then
-          #       echo "+"            <-- this is the '+' we saw
-          #   ...
+          # scripts/setlocalversion ends with:
           #   echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"
+          # With CONFIG_LOCALVERSION_AUTO=n it still appends the scm "-g<commit>" tail,
+          # which produced 6.6.118-android15-8-4k-g5e9ee92883e7 instead of the stock
+          # 6.6.118-android15-8-g93e223c276e7-abogki500782043-4k.
           #
-          # So the '+' appears when LOCALVERSION is UNSET in the make environment.
-          # We must (a) keep setlocalversion intact (it produces the whole release
-          # string, including KERNELVERSION) and (b) explicitly pass LOCALVERSION=""
-          # to make so the UNSET branch is never taken.
+          # Therefore: CONFIG_LOCALVERSION carries the full stock suffix, and
+          # filechk_kernel.release must emit nothing extra. We rewrite the hook so it
+          # still prints KERNELVERSION (needed by kbuild) but adds no scm suffix.
           KDIR="workspace/kernel_platform/msm-kernel"
           SL="$KDIR/scripts/setlocalversion"
           test -f "$SL" || { echo "ERROR: $SL missing"; exit 1; }
 
-          echo "=== confirm the '+' branch exists (do NOT modify the script) ==="
-          grep -n -A2 'LOCALVERSION+set' "$SL" || true
-          grep -n 'echo "+"' "$SL" || true
-          if ! grep -q 'LOCALVERSION+set' "$SL"; then
-            echo "WARNING: expected LOCALVERSION+set logic not found; check kernel version"
+          echo "=== original tail of setlocalversion ==="
+          tail -25 "$SL"
+
+          cp "$SL" /tmp/setlocalversion.orig
+          # Replace only the final echo line (line N of scripts/setlocalversion):
+          #   echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"
+          # with:
+          #   echo "${KERNELVERSION}${config_localversion}"
+          # so CONFIG_LOCALVERSION supplies the whole suffix and no scm tail is added.
+          BEFORE=$(grep -c '^echo "${KERNELVERSION}' "$SL" || true)
+          echo "matching echo lines found: $BEFORE"
+          sed -i 's|^echo "${KERNELVERSION}.*$|echo "${KERNELVERSION}${config_localversion}"|' "$SL"
+          AFTER=$(grep -c '^echo "${KERNELVERSION}${config_localversion}"' "$SL" || true)
+          echo "patched echo lines: $AFTER"
+          if [ "$AFTER" = "0" ]; then
+            echo "ERROR: failed to patch setlocalversion final echo line"
+            echo "--- last 5 lines ---"
+            tail -5 "$SL"
+            exit 1
           fi
-          echo "setlocalversion left untouched; LOCALVERSION will be forced to empty at make time"
+
+          echo "=== new tail ==="
+          tail -8 "$SL"
+          echo "=== smoke test inside the kernel tree ==="
+          ( cd "$KDIR" && sh scripts/setlocalversion . ) 2>&1 | tail -3 || true
 
       - name: build_kernel
         run: |
