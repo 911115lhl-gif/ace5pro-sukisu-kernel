@@ -164,16 +164,38 @@ jobs:
           ls -l "$KDIR/fs/susfs.c" "$KDIR/include/linux/susfs.h" "$KDIR/include/linux/susfs_def.h" || { echo "ERROR: susfs sources missing"; exit 1; }
 
           echo "=== step 7: patch KernelSU with 10_enable_susfs_for_ksu.patch ==="
-          KSU_DIR=$(dirname "$(find "$KDIR" -name 'allowlist.c' -print -quit 2>/dev/null)")
-          echo "KSU_DIR=$KSU_DIR"
-          if [ -z "$KSU_DIR" ] || [ "$KSU_DIR" = "." ]; then echo "ERROR: cannot locate KernelSU dir"; exit 1; fi
-          KSU_ROOT=$(cd "$KSU_DIR/.." && pwd)
+          # The patch uses paths like a/kernel/Kconfig and a/kernel/feature/*, so it must
+          # be applied at the KernelSU repo root (the dir that contains kernel/).
+          # allowlist.c lives at KernelSU/kernel/policy/allowlist.c, so the repo root is
+          # TWO levels above its directory.
+          KSU_ALLOWLIST=$(find "$KDIR" -name 'allowlist.c' -print -quit 2>/dev/null)
+          echo "allowlist.c = $KSU_ALLOWLIST"
+          if [ -z "$KSU_ALLOWLIST" ]; then
+            echo "ERROR: allowlist.c not found; SukiSU not integrated?"
+            find "$KDIR" -maxdepth 2 -iname '*kernelsu*' -o -maxdepth 2 -iname 'KernelSU' 2>/dev/null | head
+            exit 1
+          fi
+          KSU_ROOT=$(cd "$(dirname "$KSU_ALLOWLIST")/../.." && pwd)
           echo "KSU_ROOT=$KSU_ROOT"
+          # sanity: the repo root must contain kernel/Kconfig
+          if [ ! -f "$KSU_ROOT/kernel/Kconfig" ]; then
+            echo "ERROR: $KSU_ROOT/kernel/Kconfig missing -> wrong KSU_ROOT"
+            echo "--- looking for kernel/Kconfig around the allowlist location ---"
+            find "$(dirname "$KSU_ALLOWLIST")/../.." -maxdepth 3 -name Kconfig 2>/dev/null | head -10
+            exit 1
+          fi
+          echo "--- before patch: does KSU_SUSFS already exist? ---"
+          grep -n "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" || echo "(not present yet, will be added by patch)"
           cp -v /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch "$KSU_ROOT/" || { echo "ERROR: copy ksu patch"; exit 1; }
-          ( cd "$KSU_ROOT" && patch -p1 --forward < 10_enable_susfs_for_ksu.patch ) || echo "WARN: KernelSU patch had rejects (see .rej below)"
+          ( cd "$KSU_ROOT" && patch -p1 --forward --no-backup-if-mismatch < 10_enable_susfs_for_ksu.patch ) || echo "WARN: KernelSU patch had rejects (see .rej below)"
 
           echo "--- did KSU_SUSFS land in KernelSU Kconfig? ---"
-          grep -n "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" || { echo "ERROR: KSU_SUSFS not in KernelSU/kernel/Kconfig"; exit 1; }
+          grep -n "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" || {
+            echo "ERROR: KSU_SUSFS not in $KSU_ROOT/kernel/Kconfig"
+            echo "--- .rej files under KSU_ROOT ---"
+            find "$KSU_ROOT" -name '*.rej' 2>/dev/null | head -20
+            exit 1
+          }
 
           echo "=== make sure the kernel tree sources KernelSU's Kconfig ==="
           # find where CONFIG_KSU gets declared and confirm the Kconfig chain reaches it
@@ -187,13 +209,14 @@ jobs:
           echo "=== rejects present? ==="
           find "$KDIR" "$KSU_ROOT" -name '*.rej' 2>/dev/null | head -40 || true
 
-          echo "=== step 10: verify CONFIG_KSU_SUSFS now exists as a Kconfig symbol ==="
-          grep -rn "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" 2>/dev/null | head -3 || {
-            echo "ERROR: CONFIG_KSU_SUSFS not declared in KernelSU Kconfig"
-            echo "--- KernelSU Kconfig files ---"
-            find "$KSU_ROOT" -name 'Kconfig*' | head -10
-            exit 1
-          }
+          echo "=== step 10: confirm the symbol is reachable from the kernel Kconfig chain ==="
+          grep -n "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" | head -3
+          # the kernel tree must source KernelSU's Kconfig for the symbol to exist
+          echo "--- who sources KernelSU's Kconfig? ---"
+          grep -rn "KernelSU" "$KDIR/Kbuild" "$KDIR/Kconfig" "$KDIR/drivers/Kconfig" 2>/dev/null | head -5 || true
+          if ! grep -rqn "KernelSU" "$KDIR/Kbuild" "$KDIR/Kconfig" "$KDIR/drivers/Kconfig" 2>/dev/null; then
+            echo "WARNING: no Kconfig source line found for KernelSU; CONFIG_KSU may not be selectable"
+          fi
           echo "=== verify kernel hooks ==="
           grep -q "susfs" "$KDIR/fs/namei.c" && echo "OK namei.c" || { echo "ERROR: fs/namei.c has no susfs hook"; exit 1; }
           grep -q "susfs" "$KDIR/fs/namespace.c" && echo "OK namespace.c" || { echo "ERROR: fs/namespace.c has no susfs hook"; exit 1; }
