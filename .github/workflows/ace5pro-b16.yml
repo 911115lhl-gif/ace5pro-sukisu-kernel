@@ -225,28 +225,37 @@ jobs:
 
       - name: strip_dirty_suffix
         run: |
-          # Official SUSFS advice: a modified (dirty) tree makes setlocalversion append
-          # "+", which breaks vermagic matching against stock vendor_dlkm modules.
+          # A dirty tree makes scripts/setlocalversion append "+" (and "-dirty"),
+          # which changes the release string and breaks vermagic matching against the
+          # stock vendor_dlkm modules -> unbootable. CONFIG_LOCALVERSION in .config
+          # already carries the exact stock suffix, so the scm suffix must be empty.
           KDIR="workspace/kernel_platform/msm-kernel"
           SL="$KDIR/scripts/setlocalversion"
           test -f "$SL" || { echo "ERROR: $SL missing"; exit 1; }
-          echo "--- before: -dirty/+ occurrences ---"
-          grep -nE 'dirty|\+' "$SL" | head -12 || true
+
+          echo "=== original setlocalversion (why + appears) ==="
+          grep -n 'dirty\|localver\|scm_version\|printf' "$SL" | head -20 || true
+
           cp "$SL" /tmp/setlocalversion.orig
-          # 1) drop the "-dirty" marker
-          sed -i "s/printf '%s' -dirty/printf '%s' ''/g" "$SL"
-          # 2) drop the "localver+"/"+" scm marker
-          sed -i "s/printf '%s' \"\$localver+\"/printf '%s' \"\$localver\"/g" "$SL"
-          sed -i "s/printf '%s' \"+\"/printf '%s' \"\"/g" "$SL"
-          echo "--- after ---"
-          grep -n "dirty" "$SL" | head -8 || true
-          grep -n "printf" "$SL" | head -12 || true
-          diff /tmp/setlocalversion.orig "$SL" | head -30 || true
-          if grep -q "printf '%s' -dirty" "$SL"; then
-            echo "ERROR: -dirty still present"
+          # Hard replace: emit nothing at all. CONFIG_LOCALVERSION supplies the suffix.
+          printf '%s\n' \
+            '#!/bin/sh' \
+            '# Replaced by ace5pro workflow: emit no scm suffix so the release string' \
+            '# matches the stock kernel exactly (CONFIG_LOCALVERSION provides the suffix).' \
+            'exit 0' > "$SL"
+          chmod +x "$SL"
+
+          echo "=== new setlocalversion ==="
+          cat "$SL"
+          echo "=== smoke test: must print an empty line ==="
+          ( cd "$KDIR" && sh scripts/setlocalversion . ) | tee /tmp/slv.out
+          if [ -s /tmp/slv.out ] && [ -n "$(cat /tmp/slv.out)" ]; then
+            echo "ERROR: setlocalversion still emits a suffix:"
+            cat /tmp/slv.out
+            cp /tmp/setlocalversion.orig "$SL"
             exit 1
           fi
-          echo "setlocalversion patched: no + / -dirty suffix will be appended"
+          echo "OK: setlocalversion emits nothing"
 
       - name: build_kernel
         run: |
