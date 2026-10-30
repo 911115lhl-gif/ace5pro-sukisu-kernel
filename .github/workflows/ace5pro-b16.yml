@@ -669,12 +669,11 @@ jobs:
 
           cd /tmp/ak3
           ZIP="AnyKernel3-sun-sm8750-b16-SukiSU-SUSFS-KPM-${SHORT_SHA}.zip"
-          rm -f "$ZIP"
-          # -r9 keeps directory entries and uses '/' separators, which the Android-side
-          # unzip implementations require (a Windows repack with '\' breaks SukiSU's
-          # "Failed to extract update-binary").
-          zip -r9 "$ZIP" . -x '.git/*' '*.zip'
-          mkdir -p /tmp/artifact && cp "$ZIP" /tmp/artifact/
+          mkdir -p /tmp/artifact
+          rm -f "/tmp/artifact/$ZIP"
+          # Keep the archive outside the source tree so zip cannot include itself.
+          # -r9 preserves directory entries and '/' paths required by Android recovery.
+          zip -r9 "/tmp/artifact/$ZIP" . -x '.git/*' '**/.git/*' '*.zip' '**/*.zip'
           echo "--- zip contents (directories must be listed) ---"
           unzip -l "/tmp/artifact/$ZIP" | head -40
           # the kernel and the installer must be inside the zip
