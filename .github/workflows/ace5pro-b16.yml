@@ -131,16 +131,15 @@ jobs:
         run: |
           cd workspace/kernel_platform/msm-kernel
           CFG=arch/arm64/configs/vendor/sun_perf.config
-          cat >> "$CFG" <<'EOF'
-
-          CONFIG_KSU=y
-          CONFIG_KPM=y
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KALLSYMS_ALL=y
-          CONFIG_LOCALVERSION_AUTO=n
-          EOF
+          echo "" >> "$CFG"
+          echo "CONFIG_KSU=y" >> "$CFG"
+          echo "CONFIG_KPM=y" >> "$CFG"
+          echo "CONFIG_KSU_SUSFS=y" >> "$CFG"
+          echo "CONFIG_KALLSYMS_ALL=y" >> "$CFG"
+          echo "CONFIG_LOCALVERSION_AUTO=n" >> "$CFG"
           echo "CONFIG_LOCALVERSION=\"${{ inputs.LOCALVERSION }}\"" >> "$CFG"
-          grep -E "CONFIG_KSU=|CONFIG_KPM=|CONFIG_KSU_SUSFS=|CONFIG_LOCALVERSION" "$CFG"
+          echo "--- appended config ---"
+          tail -10 "$CFG"
 
       - name: build_kernel
         run: |
