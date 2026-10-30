@@ -315,24 +315,32 @@ jobs:
               echo "base: $BASE_CFG"
               echo "fragments: $FRAGS"
               test -f "$PWD/$K/scripts/kconfig/merge_config.sh" || { echo "ERROR: merge_config.sh missing"; exit 1; }
-              # usage: merge_config.sh [opts] <base config> <fragment...>  -> writes to KCONFIG_CONFIG
-              ( cd "$PWD/$K" && KCONFIG_CONFIG="$BASE_CFG" bash "$PWD/$K/scripts/kconfig/merge_config.sh" -m -r -y -O "$OUT" "$BASE_CFG" $FRAGS ) \
+              # merge_config.sh: with KCONFIG_CONFIG set, -O is ignored (it is only a
+              # fallback for deriving KCONFIG_CONFIG), so we omit it. -m = don't run make.
+              ( cd "$PWD/$K" && KCONFIG_CONFIG="$BASE_CFG" bash "$PWD/$K/scripts/kconfig/merge_config.sh" -m -r -y "$BASE_CFG" $FRAGS ) \
                 || { echo "ERROR: merge_config failed"; exit 1; }
               make -C $K O=$OUT olddefconfig
               echo "--- resulting key configs ---"
               grep -E "^CONFIG_(KSU|KPM|KSU_SUSFS|ARM64_4K_PAGES|ARM64_16K_PAGES|LOCALVERSION)=" "$OUT/.config" || true
               # KSU must survive olddefconfig; if it vanished the Kconfig hook is missing
-              if ! grep -qE "^CONFIG_KSU=y" "$OUT/.config"; then
+              if ! grep -qE "^CONFIG_KSU=[ym]" "$OUT/.config"; then
                 echo "ERROR: CONFIG_KSU did not survive olddefconfig - SukiSU Kconfig hook missing"
-                echo "--- where sources KSU Kconfig is referenced ---"
-                grep -rn "kernelsu\|KernelSU\|sukisu" $K/Kconfig $K/drivers/Kconfig 2>/dev/null | head -5
-                echo "--- KSU files copied into tree ---"
-                find $K -maxdepth 3 -iname '*kernelsu*' -o -maxdepth 3 -iname 'allowlist.c' 2>/dev/null | head -5
+                echo "--- is KSU Kconfig sourced anywhere? ---"
+                grep -rn "kernelsu\|KernelSU\|sukisu" $K/Kconfig $K/drivers/Kconfig 2>/dev/null | head -5 || true
+                echo "--- KSU files present in tree? ---"
+                find $K -maxdepth 3 \( -iname '*kernelsu*' -o -iname 'allowlist.c' \) 2>/dev/null | head -5 || true
+                echo "--- what setup.sh actually did ---"
+                ls -la $K/KernelSU 2>/dev/null || echo "no $K/KernelSU dir"
                 exit 1
               fi
+              # EXTRAVERSION gives -android15-8; CONFIG_LOCALVERSION (in .config) gives
+              # the g...-abogki... suffix; CONFIG_LOCALVERSION_AUTO=n stops setlocalversion
+              # from appending -dirty.
               make -C $K O=$OUT -j"$(nproc)" EXTRAVERSION=-android15-8 Image
               if [ -f "$OUT/arch/arm64/boot/Image" ]; then
                 echo "manual build OK: $OUT/arch/arm64/boot/Image"
+                echo "--- built release string ---"
+                grep -a -o "Linux version [^ ]*" "$OUT/arch/arm64/boot/Image" | head -1 || true
                 BUILD_OK=1
               else
                 echo "ERROR: manual build produced no Image"
