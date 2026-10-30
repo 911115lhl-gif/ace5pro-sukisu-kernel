@@ -151,32 +151,48 @@ jobs:
       - name: apply_susfs
         if: ${{ inputs.ENABLE_SUSFS == true }}
         run: |
+          # Follows the official susfs4ksu README "Apply SUSFS patches" steps 3-10:
+          #   3/6 copy patch+fs+include into tree, 7 patch KernelSU (this is what
+          #   defines CONFIG_KSU_SUSFS in KernelSU/kernel/Kconfig), 8 patch kernel.
           git clone --depth=1 -b gki-android15-6.6 https://github.com/ShirkNeko/susfs4ksu.git /tmp/susfs
-          cd workspace/kernel_platform/msm-kernel
-          FAILED=""
-          for p in $(ls /tmp/susfs/kernel_patches/*.patch 2>/dev/null); do
-            echo "=== applying $(basename "$p") ==="
-            if git apply -p1 --reject "$p"; then
-              echo "OK: $(basename "$p")"
-            else
-              echo "WARN: $(basename "$p") had rejects, continuing"
-              FAILED="$FAILED $(basename "$p")"
-            fi
-          done
-          echo "=== reject files ==="
-          find . -name '*.rej' | head -50
-          echo "=== check core susfs symbols in tree ==="
-          grep -rl "susfs" fs/ kernel/ 2>/dev/null | head -10
-          if ! grep -q "susfs" fs/namei.c 2>/dev/null; then
-            echo "ERROR: fs/namei.c has no susfs hook - patch not applied"
+          KDIR="workspace/kernel_platform/msm-kernel"
+          ls /tmp/susfs/kernel_patches
+
+          echo "=== step 5/6: copy fs/ and include/linux/ sources into kernel tree ==="
+          cp -v /tmp/susfs/kernel_patches/fs/* "$KDIR/fs/" || { echo "ERROR: copy fs failed"; exit 1; }
+          cp -v /tmp/susfs/kernel_patches/include/linux/* "$KDIR/include/linux/" || { echo "ERROR: copy include failed"; exit 1; }
+          ls -l "$KDIR/fs/susfs.c" "$KDIR/include/linux/susfs.h" "$KDIR/include/linux/susfs_def.h" || { echo "ERROR: susfs sources missing"; exit 1; }
+
+          echo "=== step 7: patch KernelSU with 10_enable_susfs_for_ksu.patch ==="
+          KSU_DIR=$(dirname "$(find "$KDIR" -name 'allowlist.c' -print -quit 2>/dev/null)")
+          echo "KSU_DIR=$KSU_DIR"
+          if [ -z "$KSU_DIR" ] || [ "$KSU_DIR" = "." ]; then echo "ERROR: cannot locate KernelSU dir"; exit 1; fi
+          KSU_ROOT=$(cd "$KSU_DIR/.." && pwd)
+          echo "KSU_ROOT=$KSU_ROOT"
+          cp -v /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch "$KSU_ROOT/" || { echo "ERROR: copy ksu patch"; exit 1; }
+          ( cd "$KSU_ROOT" && patch -p1 --forward < 10_enable_susfs_for_ksu.patch ) || echo "WARN: KernelSU patch had rejects (see .rej below)"
+
+          echo "=== step 8: patch kernel tree with 50_add_susfs patch ==="
+          P50=$(ls /tmp/susfs/kernel_patches/50_add_susfs_in_gki-android15-*.patch 2>/dev/null | head -1)
+          echo "patch: $P50"
+          ( cd "$KDIR" && git apply -p1 --reject "$P50" ) && echo "kernel patch applied clean" || echo "WARN: kernel patch had rejects"
+
+          echo "=== rejects present? ==="
+          find "$KDIR" "$KSU_ROOT" -name '*.rej' 2>/dev/null | head -40 || true
+
+          echo "=== step 10: verify CONFIG_KSU_SUSFS now exists as a Kconfig symbol ==="
+          grep -rn "config KSU_SUSFS" "$KSU_ROOT/kernel/Kconfig" 2>/dev/null | head -3 || {
+            echo "ERROR: CONFIG_KSU_SUSFS not declared in KernelSU Kconfig"
+            echo "--- KernelSU Kconfig files ---"
+            find "$KSU_ROOT" -name 'Kconfig*' | head -10
             exit 1
-          fi
-          if ! grep -q "susfs" fs/namespace.c 2>/dev/null; then
-            echo "ERROR: fs/namespace.c has no susfs hook - patch not applied"
-            exit 1
-          fi
-          echo "susfs core hooks present ok"
-          if [ -n "$FAILED" ]; then echo "patches with rejects:$FAILED"; fi
+          }
+          echo "=== verify kernel hooks ==="
+          grep -q "susfs" "$KDIR/fs/namei.c" && echo "OK namei.c" || { echo "ERROR: fs/namei.c has no susfs hook"; exit 1; }
+          grep -q "susfs" "$KDIR/fs/namespace.c" && echo "OK namespace.c" || { echo "ERROR: fs/namespace.c has no susfs hook"; exit 1; }
+          echo "=== kernel_patches/KernelSU patched files ==="
+          ( cd "$KSU_ROOT" && git status --porcelain 2>/dev/null | head -20 ) || true
+          echo "susfs integrated ok"
 
       - name: write_kernel_config
         run: |
@@ -206,6 +222,31 @@ jobs:
           echo "CONFIG_LOCALVERSION=\"${{ inputs.LOCALVERSION }}\"" >> "$CFG"
           echo "--- appended config ---"
           tail -14 "$CFG"
+
+      - name: strip_dirty_suffix
+        run: |
+          # Official SUSFS advice: a modified (dirty) tree makes setlocalversion append
+          # "+", which breaks vermagic matching against stock vendor_dlkm modules.
+          KDIR="workspace/kernel_platform/msm-kernel"
+          SL="$KDIR/scripts/setlocalversion"
+          test -f "$SL" || { echo "ERROR: $SL missing"; exit 1; }
+          echo "--- before: -dirty/+ occurrences ---"
+          grep -nE 'dirty|\+' "$SL" | head -12 || true
+          cp "$SL" /tmp/setlocalversion.orig
+          # 1) drop the "-dirty" marker
+          sed -i "s/printf '%s' -dirty/printf '%s' ''/g" "$SL"
+          # 2) drop the "localver+"/"+" scm marker
+          sed -i "s/printf '%s' \"\$localver+\"/printf '%s' \"\$localver\"/g" "$SL"
+          sed -i "s/printf '%s' \"+\"/printf '%s' \"\"/g" "$SL"
+          echo "--- after ---"
+          grep -n "dirty" "$SL" | head -8 || true
+          grep -n "printf" "$SL" | head -12 || true
+          diff /tmp/setlocalversion.orig "$SL" | head -30 || true
+          if grep -q "printf '%s' -dirty" "$SL"; then
+            echo "ERROR: -dirty still present"
+            exit 1
+          fi
+          echo "setlocalversion patched: no + / -dirty suffix will be appended"
 
       - name: build_kernel
         run: |
@@ -375,6 +416,13 @@ jobs:
           grep -a "Linux version" "$IMG" | head -1
           grep -a "Linux version" "$IMG" | grep -q "${{ env.GKI_VER_EXPECT }}" || { echo "ERROR: not ${{ env.GKI_VER_EXPECT }}"; exit 1; }
           grep -a "Linux version" "$IMG" | grep -q "abogki500782043-4k" || { echo "ERROR: localversion mismatch"; exit 1; }
+          # a trailing '+' means setlocalversion saw a dirty tree -> vermagic mismatch
+          if grep -a -o "Linux version [^ ]*" "$IMG" | head -1 | grep -q -- '+'; then
+            echo "ERROR: kernel release has a trailing '+' (dirty tree marker); vendor_dlkm modules would fail to load"
+            grep -a -o "Linux version [^ ]*" "$IMG" | head -1
+            exit 1
+          fi
+          echo "release string OK (no '+' suffix)"
           CFG=""
           for c in out_manual/.config dist/.config out/kernel-platform/.config; do
             if [ -s "$c" ]; then CFG="$c"; break; fi
