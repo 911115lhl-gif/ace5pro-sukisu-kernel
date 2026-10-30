@@ -250,11 +250,43 @@ jobs:
               K=msm-kernel
               CFGDIR=$K/arch/arm64/configs
               OUT=$PWD/out_manual
-              CLANG_DIR=$(ls -d prebuilts/clang/host/linux-x86/clang-* 2>/dev/null | head -1)
+              # honour build.config.constants CLANG_VERSION (e.g. r510928); the old
+              # clang-3289846 has no ld.lld and breaks kconfig linking.
+              CLANG_VER=$(sed -n 's/^CLANG_VERSION=//p' $K/build.config.constants 2>/dev/null | head -1)
+              echo "CLANG_VERSION from build.config.constants: ${CLANG_VER:-<empty>}"
+              CLANG_DIR=""
+              if [ -n "$CLANG_VER" ] && [ -d "prebuilts/clang/host/linux-x86/clang-${CLANG_VER}" ]; then
+                CLANG_DIR="prebuilts/clang/host/linux-x86/clang-${CLANG_VER}"
+              else
+                # fall back to any clang whose bin/ actually contains ld.lld
+                for d in prebuilts/clang/host/linux-x86/clang-*; do
+                  if [ -x "$d/bin/ld.lld" ] && [ -x "$d/bin/clang" ]; then CLANG_DIR="$d"; break; fi
+                done
+              fi
               echo "clang: $CLANG_DIR"
-              if [ -z "$CLANG_DIR" ]; then echo "ERROR: no clang prebuilt"; exit 1; fi
-              export PATH="$CLANG_DIR/bin:$PATH"
+              if [ -z "$CLANG_DIR" ]; then
+                echo "ERROR: no usable clang prebuilt (needs bin/clang + bin/ld.lld)"
+                ls prebuilts/clang/host/linux-x86/ 2>/dev/null | head
+                exit 1
+              fi
+              if [ ! -x "$CLANG_DIR/bin/ld.lld" ]; then
+                echo "ERROR: $CLANG_DIR/bin/ld.lld missing"
+                ls "$CLANG_DIR/bin" | grep -E '^(ld\.lld|clang|lld)$' || true
+                exit 1
+              fi
+              export PATH="$PWD/$CLANG_DIR/bin:$PATH"
+              # ACK ships host tools (dtc, etc.) under prebuilts/build-tools
+              for tb in prebuilts/build-tools/path/linux-x86 prebuilts/kernel-build-tools/path/linux-x86; do
+                if [ -d "$PWD/$tb" ]; then
+                  export PATH="$PWD/$tb:$PATH"
+                  echo "added build-tools: $tb"
+                fi
+              done
               export ARCH=arm64 LLVM=1 LLVM_IAS=1
+              echo "--- tool sanity ---"
+              command -v clang && clang --version | head -1
+              command -v ld.lld && ld.lld --version | head -1
+              command -v dtc && dtc --version || echo "WARNING: dtc not found (kernel may still build Image)"
               rm -rf "$OUT" && mkdir -p "$OUT"
               if [ ! -f "$CFGDIR/gki_defconfig" ]; then
                 echo "ERROR: $CFGDIR/gki_defconfig not found"
