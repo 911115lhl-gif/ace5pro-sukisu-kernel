@@ -570,17 +570,34 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/ak3
           test -f /tmp/ak3/anykernel.sh || { echo "ERROR: anykernel.sh missing in template"; ls /tmp/ak3 | head; exit 1; }
           cp "$IMG" /tmp/ak3/Image
-          echo "--- template slot settings BEFORE ---"
-          grep -nE 'is_slot_device|^block=' /tmp/ak3/anykernel.sh || echo "(none found)"
-          # A/B device: force slot-aware flashing. If the key is absent, insert it.
-          if grep -qE '^is_slot_device=' /tmp/ak3/anykernel.sh; then
-            sed -i 's/^is_slot_device=.*/is_slot_device=1;/' /tmp/ak3/anykernel.sh
+          AK=/tmp/ak3/anykernel.sh
+          echo "--- template vars BEFORE ---"
+          grep -nE 'IS_SLOT_DEVICE|is_slot_device|^BLOCK=|^block=' "$AK" || echo "(none found)"
+
+          # AK3 uses UPPERCASE shell variables: BLOCK=... and IS_SLOT_DEVICE=0/1.
+          # The shipped template points BLOCK at an OMAP device path, so it must be
+          # replaced with the generic by-name/boot path for this Qualcomm A/B device,
+          # and IS_SLOT_DEVICE must be 1 so the script follows the active slot.
+          if grep -qE '^[[:space:]]*IS_SLOT_DEVICE=' "$AK"; then
+            sed -i 's|^[[:space:]]*IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=1;|' "$AK"
           else
-            sed -i '/^## AnyKernel setup end/a is_slot_device=1;' /tmp/ak3/anykernel.sh
+            echo "IS_SLOT_DEVICE=1;" >> "$AK"
           fi
-          echo "--- template slot settings AFTER ---"
-          grep -nE 'is_slot_device|^block=' /tmp/ak3/anykernel.sh || true
-          grep -qE '^is_slot_device=1' /tmp/ak3/anykernel.sh || { echo "ERROR: failed to set is_slot_device=1"; exit 1; }
+          if grep -qE '^[[:space:]]*BLOCK=' "$AK"; then
+            sed -i 's|^[[:space:]]*BLOCK=.*|BLOCK=/dev/block/bootdevice/by-name/boot;|' "$AK"
+          else
+            echo "BLOCK=/dev/block/bootdevice/by-name/boot;" >> "$AK"
+          fi
+
+          echo "--- template vars AFTER ---"
+          grep -nE 'IS_SLOT_DEVICE|BLOCK=' "$AK" || true
+          grep -qE '^[[:space:]]*IS_SLOT_DEVICE=1' "$AK" || { echo "ERROR: IS_SLOT_DEVICE not set to 1"; exit 1; }
+          grep -q 'by-name/boot' "$AK" || { echo "ERROR: BLOCK not pointed at by-name/boot"; exit 1; }
+
+          # Do NOT touch the ramdisk: stock boot keeps its ramdisk, we only swap the kernel.
+          echo "--- keep dump_boot/write_boot (ramdisk preserving) ---"
+          grep -nE '^(dump_boot|write_boot|flash_boot)' "$AK" || true
+
           cd /tmp/ak3
           ZIP="AnyKernel3-sun-sm8750-b16-SukiSU-SUSFS-KPM-${SHORT_SHA}.zip"
           zip -r9 "$ZIP" . -x '.git/*'
