@@ -61,7 +61,7 @@ jobs:
       TARGET: sun
       BUILD_VARIANT_NAME: ${{ inputs.BUILD_VARIANT }}
       GKI_VER_EXPECT: "6.6.118-android15-8"
-      BAZEL_VERSION: "7.4.1"
+      BAZEL_VERSION: "8.1.1"
 
     steps:
       - name: guard_params
@@ -193,19 +193,38 @@ jobs:
           MODFILE="build/kernel/kleaf/bzlmod/bazel.MODULE.bazel"
           echo "--- symlink target ---"
           ls -l MODULE.bazel
-          echo "=== bazel 7.4.1: keep tree untouched, just enable rule subrules ==="
-          # bazel 8 removed native PyInfo/CcInfo and cc_configure APIs this tree still uses,
-          # so stay on bazel 7.4.1 and turn on subrule() which kleaf needs.
-          {
-            echo 'common --experimental_enable_rule_subrules'
-            echo 'build --experimental_enable_rule_subrules'
-            echo 'query --experimental_enable_rule_subrules'
-          } > .bazelrc
-          cp .bazelrc user.bazelrc
-          echo "--- .bazelrc ---"
+          echo "=== bazel 8.1.1 + bzlmod ==="
+          # 1) bazel 8 requires bazel_dep for every local_path_override target.
+          #    Insert right after module() (which must stay the first call).
+          if ! grep -q 'ACE5PRO_PATCHED' "$MODFILE"; then
+            awk '
+              { print }
+              /^\)$/ && !done && seen_module {
+                print ""
+                print "bazel_dep(name = \"apple_support\", version = \"1.0.0\")  # ACE5PRO_PATCHED"
+                print "bazel_dep(name = \"rules_java\", version = \"7.12.2\")  # ACE5PRO_PATCHED"
+                print ""
+                done = 1
+              }
+              /^module\($/ { seen_module = 1 }
+            ' "$MODFILE" > /tmp/module.new
+            mv /tmp/module.new "$MODFILE"
+            echo "inserted bazel_dep after module()"
+          fi
+          head -24 "$MODFILE"
+          echo "--- reexports.bzl PyInfo usage (rule out guesswork) ---"
+          RP="external/bazelbuild-rules_python/python/private/reexports.bzl"
+          if [ -f "$RP" ]; then
+            sed -n '30,60p' "$RP"
+          else
+            echo "not found at $RP"
+            find external/bazelbuild-rules_python -name 'reexports.bzl' | head -5
+          fi
+          echo "--- .bazelrc (bzlmod mode) ---"
+          echo 'common --enable_bzlmod' > .bazelrc
+          echo "common --enable_bzlmod" > user.bazelrc
           cat .bazelrc
-          export BAZEL_ARGS="--experimental_enable_rule_subrules"
-          echo "=== bazel version that will be used ==="
+          export BAZEL_ARGS="--enable_bzlmod"
           ./tools/bazel --version || true
           if [ "${{ inputs.DRY_RUN }}" = "true" ]; then
             python3 build_with_bazel.py -t "$TARGET" "$BUILD_VARIANT_NAME" --dry-run $BAZEL_ARGS
