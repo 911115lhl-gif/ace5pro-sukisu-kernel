@@ -288,7 +288,14 @@ jobs:
           echo 'I2luY2x1ZGUgPGxpbnV4L2luaXQuaD4KI2luY2x1ZGUgPGxpbnV4L21vZHVsZS5oPgojaW5jbHVkZSA8bGludXgvb2YuaD4KI2luY2x1ZGUgPGxpbnV4L3NsYWIuaD4KI2luY2x1ZGUgPGxpbnV4L3N0cmluZy5oPgoKc3RhdGljIGludCBfX2luaXQgaG1iaXJkX3BhdGNoX2luaXQodm9pZCkKewogICAgc3RydWN0IGRldmljZV9ub2RlICp2ZXJfbnA7CiAgICBjb25zdCBjaGFyICp0eXBlOwogICAgc3RydWN0IHByb3BlcnR5ICpwcm9wLCAqbmV3X3Byb3A7CiAgICBpbnQgcmV0OwoKICAgIHZlcl9ucCA9IG9mX2ZpbmRfbm9kZV9ieV9wYXRoKCIvc29jL29wbHVzLGhtYmlyZC92ZXJzaW9uX3R5cGUiKTsKICAgIGlmICghdmVyX25wKSB7CiAgICAgICAgcHJfaW5mbygiaG1iaXJkX3BhdGNoOiB2ZXJzaW9uX3R5cGUgbm9kZSBub3QgZm91bmRcbiIpOwogICAgICAgIHJldHVybiAwOwogICAgfQogICAgcmV0ID0gb2ZfcHJvcGVydHlfcmVhZF9zdHJpbmcodmVyX25wLCAidHlwZSIsICZ0eXBlKTsKICAgIGlmIChyZXQpIHsKICAgICAgICBwcl9pbmZvKCJobWJpcmRfcGF0Y2g6IHR5cGUgcHJvcGVydHkgbm90IGZvdW5kXG4iKTsKICAgICAgICBvZl9ub2RlX3B1dCh2ZXJfbnApOwogICAgICAgIHJldHVybiAwOwogICAgfQogICAgaWYgKHN0cmNtcCh0eXBlLCAiSE1CSVJEX09HS0kiKSkgewogICAgICAgIG9mX25vZGVfcHV0KHZlcl9ucCk7CiAgICAgICAgcmV0dXJuIDA7CiAgICB9CiAgICBwcm9wID0gb2ZfZmluZF9wcm9wZXJ0eSh2ZXJfbnAsICJ0eXBlIiwgTlVMTCk7CiAgICBpZiAocHJvcCkgewogICAgICAgIG5ld19wcm9wID0ga21hbGxvYyhzaXplb2YoKm5ld19wcm9wKSwgR0ZQX0tFUk5FTCk7CiAgICAgICAgaWYgKCFuZXdfcHJvcCkgewogICAgICAgICAgICBvZl9ub2RlX3B1dCh2ZXJfbnApOwogICAgICAgICAgICByZXR1cm4gMDsKICAgICAgICB9CiAgICAgICAgbWVtY3B5KG5ld19wcm9wLCBwcm9wLCBzaXplb2YoKnByb3ApKTsKICAgICAgICBuZXdfcHJvcC0+dmFsdWUgPSBrbWFsbG9jKHN0cmxlbigiSE1CSVJEX0dLSSIpICsgMSwgR0ZQX0tFUk5FTCk7CiAgICAgICAgaWYgKCFuZXdfcHJvcC0+dmFsdWUpIHsKICAgICAgICAgICAga2ZyZWUobmV3X3Byb3ApOwogICAgICAgICAgICBvZl9ub2RlX3B1dCh2ZXJfbnApOwogICAgICAgICAgICByZXR1cm4gMDsKICAgICAgICB9CiAgICAgICAgc3RyY3B5KG5ld19wcm9wLT52YWx1ZSwgIkhNQklSRF9HS0kiKTsKICAgICAgICBuZXdfcHJvcC0+bGVuZ3RoID0gc3RybGVuKCJITUJJUkRfR0tJIikgKyAxOwogICAgICAgIGlmIChvZl9yZW1vdmVfcHJvcGVydHkodmVyX25wLCBwcm9wKSAhPSAwKSB7CiAgICAgICAgICAgIG9mX25vZGVfcHV0KHZlcl9ucCk7CiAgICAgICAgICAgIHJldHVybiAwOwogICAgICAgIH0KICAgICAgICBpZiAob2ZfYWRkX3Byb3BlcnR5KHZlcl9ucCwgbmV3X3Byb3ApICE9IDApIHsKICAgICAgICAgICAgb2Zfbm9kZV9wdXQodmVyX25wKTsKICAgICAgICAgICAgcmV0dXJuIDA7CiAgICAgICAgfQogICAgICAgIHByX2luZm8oImhtYmlyZF9wYXRjaDogSE1CSVJEX09HS0kgLT4gSE1CSVJEX0dLSSBva1xuIik7CiAgICB9CiAgICBvZl9ub2RlX3B1dCh2ZXJfbnApOwogICAgcmV0dXJuIDA7Cn0KZWFybHlfaW5pdGNhbGwoaG1iaXJkX3BhdGNoX2luaXQpOwpNT0RVTEVfTElDRU5TRSgiR1BMIik7Ck1PRFVMRV9ERVNDUklQVElPTigiRm9yY2VmdWxseSBjb252ZXJ0IEhNQklSRF9PR0tJIHRvIEhNQklSRF9HS0kuIik7' | base64 -d > hmbird_patch.c
           test -s hmbird_patch.c || { echo 'ERROR: hmbird_patch.c empty'; exit 1; }
           head -3 hmbird_patch.c
-          grep -q "hmbird_patch.o" Makefile || echo "obj-y += hmbird_patch.o" >> Makefile
+          # build it unconditionally. printf (not echo) so a Makefile whose last line
+          # lacks a trailing newline cannot glue the new rule onto that line.
+          if ! grep -q '^obj-y += hmbird_patch\.o' Makefile; then
+            printf '\nobj-y += hmbird_patch.o\n' >> Makefile
+          fi
+          echo "--- Makefile tail ---"
+          tail -3 Makefile
+          grep -q '^obj-y += hmbird_patch\.o' Makefile || { echo 'ERROR: Makefile not updated'; exit 1; }
           echo "hmbird_patch.c installed"
 
       - name: set_release_string
