@@ -726,72 +726,94 @@ jobs:
           #   0x1000..        kernel Image, then zero fill to the 96MB partition
           # os_version is 0x00000000 and signature_size is 0 (no AVB payload), so the
           # installed header differs from stock in exactly one field: kernel_size.
+          #
+          # Pure shell on purpose: no python, no heredoc, nothing that YAML can mangle.
           cd workspace/kernel_platform
           IMG=$(find . -type f -name Image -path '*arch/arm64/boot/Image' 2>/dev/null | head -1)
           test -n "$IMG" && test -s "$IMG" || { echo "ERROR: Image missing"; exit 1; }
-          echo "kernel: $IMG ($(stat -c%s "$IMG") bytes)"
+          KSIZE=$(stat -c%s "$IMG")
+          echo "kernel: $IMG ($KSIZE bytes)"
+
+          # arm64 Image magic "ARM\x64" (0x644D5241 little endian) must sit at 0x38
+          MAGIC=$(od -An -tx1 -j56 -N4 "$IMG" | tr -d ' \n')
+          echo "kernel magic bytes @0x38: $MAGIC"
+          if [ "$MAGIC" != "41524d64" ]; then
+            echo "ERROR: not a raw arm64 Image (expected 41524d64, got $MAGIC)"
+            exit 1
+          fi
+
           mkdir -p /tmp/artifact
           BOOTIMG=/tmp/artifact/boot_sun_sukisu_susfs_kpm.img
+          HDR=/tmp/boot_hdr.bin
+          rm -f "$HDR" "$BOOTIMG"
 
-          # written to a file first; heredocs inside a YAML run: block are fragile
-          cat > /tmp/mkboot.py <<'PYEOF'
-          import struct, sys
-          src, dst = sys.argv[1], sys.argv[2]
-          kernel = open(src, 'rb').read()
-          magic = struct.unpack_from('<I', kernel, 0x38)[0]
-          assert magic == 0x644D5241, 'not a raw arm64 Image (magic 0x%08X)' % magic
-          HEADER_SIZE = 1584
-          PAGE = 4096
-          hdr = bytearray(HEADER_SIZE)
-          hdr[0:8] = b'ANDROID!'
-          struct.pack_into('<I', hdr, 0x08, len(kernel))   # kernel_size
-          struct.pack_into('<I', hdr, 0x0C, 0)             # ramdisk_size
-          struct.pack_into('<I', hdr, 0x10, 0)             # os_version (stock is 0)
-          struct.pack_into('<I', hdr, 0x14, HEADER_SIZE)   # header_size
-          struct.pack_into('<I', hdr, 0x28, 4)             # header_version
-          struct.pack_into('<I', hdr, 0x2C + 1536, 0)      # signature_size
-          with open(dst, 'wb') as f:
-              f.write(hdr)
-              f.write(b'\0' * (PAGE - HEADER_SIZE))
-              f.write(kernel)
-          print('wrote %s (%d bytes)' % (dst, PAGE + len(kernel)))
-          PYEOF
-          python3 /tmp/mkboot.py "$IMG" "$BOOTIMG" || { echo "ERROR: mkboot failed"; exit 1; }
+          # 1584-byte v4 header, then zero fill to the 4K page boundary.
+          # Every byte is written with printf octal escapes: "\NNN" is portable across
+          # bash builtin, GNU and busybox printf, while "\xNN" is not.
+          dd if=/dev/zero of="$HDR" bs=1 count=1584 status=none
+          printf 'ANDROID!' | dd of="$HDR" bs=1 seek=0 conv=notrunc status=none
+
+          # little-endian byte writer: echo_u32le <value> <offset> <file>
+          echo_u32le() {
+            v=$1; o=$2; fl=$3
+            b0=$(( v         & 255 ))
+            b1=$(( (v >>  8) & 255 ))
+            b2=$(( (v >> 16) & 255 ))
+            b3=$(( (v >> 24) & 255 ))
+            o0=$(printf '%03o' "$b0")
+            o1=$(printf '%03o' "$b1")
+            o2=$(printf '%03o' "$b2")
+            o3=$(printf '%03o' "$b3")
+            printf "\\$o0\\$o1\\$o2\\$o3" | dd of="$fl" bs=1 seek="$o" conv=notrunc status=none
+          }
+
+          # kernel_size at 0x08; ramdisk_size = 0 at 0x0C; os_version = 0 at 0x10
+          echo_u32le "$KSIZE" 8 "$HDR"
+          echo_u32le 0 12 "$HDR"
+          echo_u32le 0 16 "$HDR"
+          # header_size = 1584 at 0x14; header_version = 4 at 0x28
+          echo_u32le 1584 20 "$HDR"
+          echo_u32le 4 40 "$HDR"
+          # signature_size = 0 at 0x2C + 1536 = 1580
+          echo_u32le 0 1580 "$HDR"
+
+          dd if=/dev/zero of=/tmp/boot_pad.bin bs=1 count=2512 status=none
+          cat "$HDR" /tmp/boot_pad.bin "$IMG" > "$BOOTIMG"
           test -s "$BOOTIMG" || { echo "ERROR: boot.img not produced"; exit 1; }
 
-          cat > /tmp/chkboot.py <<'PYEOF'
-          import struct, sys
-          b = open(sys.argv[1], 'rb').read()
-          assert b[0:8] == b'ANDROID!', 'bad magic'
-          ks = struct.unpack_from('<I', b, 0x08)[0]
-          rs = struct.unpack_from('<I', b, 0x0C)[0]
-          hs = struct.unpack_from('<I', b, 0x14)[0]
-          hv = struct.unpack_from('<I', b, 0x28)[0]
-          sig = struct.unpack_from('<I', b, 0x2C + 1536)[0]
-          print('  magic         : ANDROID!')
-          print('  kernel_size   : %d' % ks)
-          print('  ramdisk_size  : %d' % rs)
-          print('  header_size   : %d' % hs)
-          print('  header_version: %d' % hv)
-          print('  signature_size: %d' % sig)
-          assert hv == 4, 'header_version must be 4'
-          assert hs == 1584, 'header_size must be 1584'
-          assert rs == 0 and sig == 0, 'ramdisk/signature must be empty'
-          assert len(b) == 4096 + ks, 'file size must be header page + kernel'
-          kmagic = struct.unpack_from('<I', b, 4096 + 0x38)[0]
-          assert kmagic == 0x644D5241, 'kernel magic wrong'
-          print('  kernel magic  : 0x%08X (ARM64)' % kmagic)
-          # the banner can sit anywhere in the image, so search the whole payload
-          i = b.find(b'Linux version ', 4096)
-          rel = b[i:i+130].split(b'\0')[0].decode('latin1', 'replace') if i > 0 else ''
-          print('  release       : %s' % (rel or '(not found)'))
-          assert rel, 'Linux version banner not found in boot.img'
-          # our build is identifiable by the CI builder account in the banner
-          assert 'runner@' in rel, 'boot.img does not carry our CI build: %s' % rel
-          print('  OK: boot.img matches the stock v4 layout and carries our kernel')
-          PYEOF
           echo "--- boot.img header check ---"
-          python3 /tmp/chkboot.py "$BOOTIMG" || { echo "ERROR: boot.img verification failed"; exit 1; }
+          SZ=$(stat -c%s "$BOOTIMG")
+          echo "  file size     : $SZ (expected $((4096 + KSIZE)))"
+          [ "$SZ" = "$((4096 + KSIZE))" ] || { echo "ERROR: size mismatch"; exit 1; }
+          echo "  magic         : $(dd if="$BOOTIMG" bs=1 count=8 status=none)"
+          read_ks=$(od -An -tu4 -j8 -N4 "$BOOTIMG" | tr -d ' ')
+          read_rs=$(od -An -tu4 -j12 -N4 "$BOOTIMG" | tr -d ' ')
+          read_hs=$(od -An -tu4 -j20 -N4 "$BOOTIMG" | tr -d ' ')
+          read_hv=$(od -An -tu4 -j40 -N4 "$BOOTIMG" | tr -d ' ')
+          read_sig=$(od -An -tu4 -j1580 -N4 "$BOOTIMG" | tr -d ' ')
+          echo "  kernel_size   : $read_ks (expected $KSIZE)"
+          echo "  ramdisk_size  : $read_rs (expected 0)"
+          echo "  header_size   : $read_hs (expected 1584)"
+          echo "  header_version: $read_hv (expected 4)"
+          echo "  signature_size: $read_sig (expected 0)"
+          [ "$read_ks" = "$KSIZE" ] || { echo "ERROR: kernel_size wrong"; exit 1; }
+          [ "$read_rs" = "0" ] || { echo "ERROR: ramdisk_size not 0"; exit 1; }
+          [ "$read_hs" = "1584" ] || { echo "ERROR: header_size not 1584"; exit 1; }
+          [ "$read_hv" = "4" ] || { echo "ERROR: header_version not 4"; exit 1; }
+          [ "$read_sig" = "0" ] || { echo "ERROR: signature_size not 0"; exit 1; }
+
+          kmagic=$(od -An -tx1 -j$((4096 + 56)) -N4 "$BOOTIMG" | tr -d ' \n')
+          echo "  kernel magic  : $kmagic (expected 41524d64)"
+          [ "$kmagic" = "41524d64" ] || { echo "ERROR: kernel payload magic wrong"; exit 1; }
+
+          REL=$(strings -n 12 "$BOOTIMG" | grep -m1 '^Linux version ')
+          echo "  release       : ${REL:-(not found)}"
+          [ -n "$REL" ] || { echo "ERROR: no Linux version banner"; exit 1; }
+          case "$REL" in
+            *runner@*) echo "  OK: banner carries our CI build" ;;
+            *) echo "ERROR: boot.img does not carry our CI build"; exit 1 ;;
+          esac
+          echo "  OK: boot.img matches the stock v4 layout"
           echo "--- artifacts ---"
           ls -l /tmp/artifact
 
