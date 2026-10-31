@@ -236,11 +236,19 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CFG"
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CFG"
           fi
-          # the release string must stay byte-identical to stock or vendor_dlkm fails
+          # The release string must stay byte-identical to stock or the untouched
+          # vendor_dlkm modules refuse to load (vermagic mismatch).
+          # gki_defconfig ships CONFIG_LOCALVERSION="-4k"; rewrite ONLY that exact
+          # assignment so nothing else containing "-4k" is touched.
           echo "CONFIG_LOCALVERSION_AUTO=n" >> "$CFG"
-          echo "s/${{ inputs.KERNEL_LOCALVERSION }}/${{ inputs.KERNEL_LOCALVERSION }}/" > /dev/null
-          # replace the -4k suffix produced by the tree with the full stock suffix
-          sed -i "s|-4k|${{ inputs.KERNEL_LOCALVERSION }}|g" "$CFG"
+          STOCK="${{ inputs.KERNEL_LOCALVERSION }}"
+          if grep -qE '^CONFIG_LOCALVERSION=' "$CFG"; then
+            # delete every existing assignment, then append exactly one
+            sed -i '/^CONFIG_LOCALVERSION=/d' "$CFG"
+          fi
+          printf 'CONFIG_LOCALVERSION="%s"\n' "$STOCK" >> "$CFG"
+          echo "--- CONFIG_LOCALVERSION lines ---"
+          grep -n '^CONFIG_LOCALVERSION' "$CFG"
           # check_defconfig rejects any change to the shipped defconfig; drop it
           sudo sed -i 's/check_defconfig//' ./common/build.config.gki
           echo "--- resulting tail ---"
@@ -292,16 +300,21 @@ jobs:
 
       - name: set_release_string
         run: |
-          # scripts/setlocalversion appends an scm tail; stock has none, so replace it
+          # scripts/setlocalversion appends an scm tail ("-g<commit>"), but the stock
+          # banner has none, so the expansion has to be removed from the final echo.
+          # Only the *expansion* is dropped: the scm_version() helper itself stays.
           KDIR="workspace/kernel_platform/common"
           SL="$KDIR/scripts/setlocalversion"
           test -f "$SL" || { echo "ERROR: $SL missing"; exit 1; }
-          echo "--- original tail ---"
-          tail -8 "$SL"
-          sed -i 's/${scm_version}//' "$SL"
-          echo "--- patched tail ---"
-          tail -8 "$SL"
-          grep -q '\${scm_version}' "$SL" && { echo "ERROR: scm_version still present"; exit 1; } || true
+          echo "--- original final echo ---"
+          grep -n 'echo "${KERNELVERSION}' "$SL" || { echo "ERROR: final echo not found"; exit 1; }
+          sed -i 's/\${scm_version}//g' "$SL"
+          echo "--- patched final echo ---"
+          grep -n 'echo "${KERNELVERSION}' "$SL"
+          if grep -q 'echo "${KERNELVERSION}.*scm_version' "$SL"; then
+            echo "ERROR: scm_version still expanded in the final echo"
+            exit 1
+          fi
           echo "--- CONFIG_LOCALVERSION in defconfig ---"
           grep -n "CONFIG_LOCALVERSION" "$KDIR/arch/arm64/configs/gki_defconfig" || true
 
@@ -339,11 +352,13 @@ jobs:
 
           cd "$PLAT/common"
           echo "=== building common (the GKI tree) ==="
+          # Build exactly like the reference flow. KCFLAGS is quoted so the shell does
+          # not try to interpret the "+=" the way it would for an exported variable.
           set +e
           make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             CC=clang LD=ld.lld HOSTLD=ld.lld \
-            ${RUSTC:+RUSTC=$RUSTC} ${PAHOLE:+PAHOLE=$PAHOLE} \
-            O=out KCFLAGS+=-O2 gki_defconfig all 2>&1 | tee /tmp/build.log
+            ${RUSTC:+RUSTC="$RUSTC"} ${PAHOLE:+PAHOLE="$PAHOLE"} \
+            O=out "KCFLAGS+=-O2" gki_defconfig all 2>&1 | tee /tmp/build.log
           rc=${PIPESTATUS[0]}
           set -e
           echo "make exit=$rc"
@@ -365,17 +380,22 @@ jobs:
           test -s "$CFG" || { echo "ERROR: .config missing"; exit 1; }
           KR=$(strings -n 12 workspace/kernel_platform/common/out/arch/arm64/boot/Image | grep -m1 '^Linux version ')
           echo "banner: $KR"
-          case "$KR" in
-            *6.6.118-android15-8*) ;;
+          # isolate the version token: everything after "Linux version " up to the
+          # first space, so a '+' anywhere else in the banner cannot confuse us
+          RELTOK=$(echo "$KR" | sed -n 's/^Linux version \([^ ]*\).*/\1/p')
+          echo "release token: $RELTOK"
+          case "$RELTOK" in
+            6.6.118-android15-8*) ;;
             *) echo "ERROR: release is not 6.6.118-android15-8"; exit 1 ;;
           esac
-          case "$KR" in
-            *"${{ inputs.KERNEL_LOCALVERSION }}"*) ;;
-            *) echo "ERROR: release does not carry the stock suffix"; exit 1 ;;
+          case "$RELTOK" in
+            *"${{ inputs.KERNEL_LOCALVERSION }}") ;;
+            *) echo "ERROR: release does not end with the stock suffix"; exit 1 ;;
           esac
-          case "$KR" in
-            *+) echo "ERROR: dangling '+' in release"; exit 1 ;;
+          case "$RELTOK" in
+            *+) echo "ERROR: dangling '+' in release token"; exit 1 ;;
           esac
+          echo "release string ok"
 
           echo "--- required symbols ---"
           grep -qE "^CONFIG_KSU=y"        "$CFG" || { echo "ERROR: CONFIG_KSU missing"; exit 1; }
@@ -398,30 +418,40 @@ jobs:
       - name: kernel_patch
         if: ${{ !inputs.DRY_RUN && inputs.ENABLE_KERNEL_PATCH == true }}
         run: |
-          # SukiSU's KernelPatch binary pass injects the hook table the manager uses.
+          # SukiSU's KernelPatch binary pass injects the hook table the manager talks to.
+          # It reads ./Image and writes ./oImage in the current directory.
           cd workspace/kernel_platform/common/out/arch/arm64/boot
-          cp Image Image.pre_patch
+          test -s Image || { echo "ERROR: Image missing before patching"; exit 1; }
+          cp -f Image Image.pre_patch
+          rm -f oImage patch_linux
           curl -fL -o patch_linux \
             https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux \
             || { echo "ERROR: could not download patch_linux"; exit 1; }
           chmod +x patch_linux
           ls -la patch_linux
           set +e
-          ./patch_linux 2>&1 | tail -30
+          ./patch_linux 2>&1 | tail -40
           prc=${PIPESTATUS[0]}
           set -e
           echo "patch_linux exit=$prc"
-          if [ -f oImage ]; then
+          if [ -s oImage ]; then
             echo "oImage produced ($(stat -c%s oImage) bytes)"
-            mv -f Image Image.orig_kernel
             mv -f oImage Image
             echo "swapped in the patched kernel"
+            rm -f Image.pre_patch
           else
-            echo "WARN: patch_linux produced no oImage; keeping the unpatched Image"
-            mv -f Image.pre_patch Image 2>/dev/null || true
+            echo "WARN: patch_linux produced no usable oImage; keeping the unpatched Image"
+            mv -f Image.pre_patch Image
           fi
-          ls -la
+          ls -la Image*
+          echo "--- release string after patching ---"
           strings -n 12 Image | grep -m1 '^Linux version ' || true
+          echo "--- ksu symbols present? ---"
+          if strings -n 6 Image | grep -q '^ksu_'; then
+            echo "  ksu symbols found in the image"
+          else
+            echo "  WARN: no ksu_ strings visible (they may be in the symbol table only)"
+          fi
 
       - name: package_ak3
         if: ${{ !inputs.DRY_RUN }}
@@ -448,6 +478,21 @@ jobs:
           # boot has no ramdisk: split_boot + flash_boot instead of dump/write
           sed -i -E 's|^[[:space:]]*dump_boot;.*$|split_boot; # no ramdisk on boot|' "$AK"
           sed -i -E 's|^[[:space:]]*write_boot;.*$|flash_boot; # write kernel back|' "$AK"
+          # fallback: if the template used a different spelling, append the calls
+          if ! grep -qE '^[[:space:]]*split_boot;' "$AK"; then
+            sed -i '/^# install/i split_boot;' "$AK" 2>/dev/null || true
+          fi
+          if ! grep -qE '^[[:space:]]*split_boot;' "$AK"; then
+            echo "ERROR: could not activate split_boot in anykernel.sh"
+            echo "--- template head ---"
+            sed -n '1,60p' "$AK"
+            exit 1
+          fi
+          if ! grep -qE '^[[:space:]]*flash_boot;' "$AK"; then
+            echo "ERROR: could not activate flash_boot in anykernel.sh"
+            sed -n '1,60p' "$AK"
+            exit 1
+          fi
           # the template ships Galaxy Nexus (tuna) tweaks that would corrupt the ramdisk
           for pat in 'backup_file init\.rc;' 'replace_string init\.rc' 'backup_file init\.tuna\.rc;' \
                      'insert_line init\.tuna\.rc' 'append_file init\.tuna\.rc' \
@@ -457,11 +502,11 @@ jobs:
 
           echo "--- anykernel.sh key lines ---"
           grep -nE 'IS_SLOT_DEVICE|^BLOCK=|device\.name[1-5]|kernel\.string' "$AK" | head -12
-          grep -qE '^[[:space:]]*split_boot;' "$AK" || { echo "ERROR: split_boot not active"; exit 1; }
-          grep -qE '^[[:space:]]*flash_boot;' "$AK" || { echo "ERROR: flash_boot not active"; exit 1; }
           if grep -qE '^[[:space:]]*(dump_boot|write_boot);' "$AK"; then
             echo "ERROR: dump_boot/write_boot still active"; exit 1
           fi
+          echo "boot section:"
+          sed -n '/# boot install/,/## end boot install/p' "$AK" | head -25
 
           mkdir -p /tmp/artifact
           ZIP="AnyKernel3-ace5pro-sun-6.6.118-SukiSU-SUSFS-KPM-${SHORT_SHA}.zip"
