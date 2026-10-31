@@ -134,24 +134,54 @@ jobs:
       - name: setup_sukisu
         run: |
           cd workspace/kernel_platform
-          # setup.sh clones SukiSU-Ultra into ./KernelSU and symlinks it into
-          # drivers/kernelsu. It auto-detects common/drivers vs drivers, so run it
-          # from kernel_platform and let it pick the right tree.
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
-            | bash -s main || { echo "ERROR: SukiSU setup.sh failed"; exit 1; }
-          echo "--- where did it land? ---"
-          ls -la KernelSU 2>/dev/null | head -3 || true
-          ls -la common/drivers/kernelsu 2>/dev/null || true
-          ls -la msm-kernel/drivers/kernelsu 2>/dev/null || true
-          KSUDIR=""
-          for d in common/drivers/kernelsu msm-kernel/drivers/kernelsu; do
-            if [ -f "$d/Kconfig" ]; then KSUDIR="$d"; break; fi
-          done
-          test -n "$KSUDIR" || { echo "ERROR: KernelSU was not wired into any tree"; exit 1; }
-          echo "KSU wired into: $KSUDIR"
+          # CONFIG_KSU_SUSFS is declared in SukiSU's own kernel/Kconfig, and only the
+          # `builtin` branch has it (main has no KSU_SUSFS symbol, so a
+          # CONFIG_KSU_SUSFS=y line is silently dropped by olddefconfig).
+          #
+          # The integration is done by hand instead of via kernel/setup.sh because that
+          # script runs `git checkout main` under some conditions and would throw the
+          # branch we asked for away.
+          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
+            BR="builtin"
+          else
+            BR="main"
+          fi
+          echo "SukiSU branch: $BR"
+          rm -rf KernelSU
+          git clone --depth=1 -b "$BR" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU \
+            || { echo "ERROR: clone SukiSU $BR failed"; exit 1; }
+          echo "--- branch actually checked out ---"
+          git -C KernelSU rev-parse --abbrev-ref HEAD || true
+          git -C KernelSU log --oneline -1 || true
+
+          DRIVER_DIR="common/drivers"
+          test -d "$DRIVER_DIR" || { echo "ERROR: $DRIVER_DIR not found"; ls -d */drivers 2>/dev/null; exit 1; }
+          echo "=== installing into $DRIVER_DIR (the GKI tree) ==="
+          rm -f "$DRIVER_DIR/kernelsu"
+          ln -sf ../KernelSU/kernel "$DRIVER_DIR/kernelsu"
+          ls -la "$DRIVER_DIR/kernelsu"
+          KSUDIR="$DRIVER_DIR/kernelsu"
+          test -f "$KSUDIR/Kconfig" || { echo "ERROR: $KSUDIR/Kconfig missing"; exit 1; }
           echo "KSUDIR=$KSUDIR" >> "$GITHUB_ENV"
-          grep -n "config KSU$" "$KSUDIR/Kconfig" || { echo "ERROR: no KSU Kconfig"; exit 1; }
-          KSU_VERSION=$(expr $(cd KernelSU && git rev-list --count main 2>/dev/null || echo 13000) + 37185)
+
+          echo "--- Kconfig symbols ---"
+          grep -n '^config KSU$'     "$KSUDIR/Kconfig" || { echo "ERROR: no KSU"; exit 1; }
+          grep -n '^config KPM$'     "$KSUDIR/Kconfig" || true
+          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
+            grep -n '^config KSU_SUSFS$' "$KSUDIR/Kconfig" \
+              || { echo "ERROR: branch $BR has no KSU_SUSFS in Kconfig"; ls "$KSUDIR" | head; exit 1; }
+            echo "  KSU_SUSFS is declared"
+          fi
+
+          echo "--- wire into the build ---"
+          grep -q 'obj-$(CONFIG_KSU)' "$DRIVER_DIR/Makefile" \
+            || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVER_DIR/Makefile"
+          grep -q 'source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig" \
+            || sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
+          tail -3 "$DRIVER_DIR/Makefile"
+          grep -n 'kernelsu/Kconfig' "$DRIVER_DIR/Kconfig" || { echo "ERROR: Kconfig not wired"; exit 1; }
+
+          KSU_VERSION=$(expr $(git -C KernelSU rev-list --count HEAD 2>/dev/null || echo 13000) + 37185)
           echo "KSU_VERSION=$KSU_VERSION" >> "$GITHUB_ENV"
           echo "KernelSU integration version: $KSU_VERSION"
 
