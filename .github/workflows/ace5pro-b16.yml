@@ -50,9 +50,9 @@ on:
         default: true
         type: boolean
       KERNEL_LOCALVERSION:
-        description: "CONFIG_LOCALVERSION suffix (must match stock for vendor_dlkm)"
+        description: "CONFIG_LOCALVERSION: the WHOLE stock suffix after 6.6.118"
         required: true
-        default: "-g93e223c276e7-abogki500782043-4k"
+        default: "-android15-8-g93e223c276e7-abogki500782043-4k"
       DRY_RUN:
         description: "stop before compiling (patch/wiring checks only)"
         required: true
@@ -396,22 +396,29 @@ jobs:
           test -s "$CFG" || { echo "ERROR: .config missing"; exit 1; }
           KR=$(strings -n 12 workspace/kernel_platform/common/out/arch/arm64/boot/Image | grep -m1 '^Linux version ')
           echo "banner: $KR"
-          # isolate the version token: everything after "Linux version " up to the
-          # first space, so a '+' anywhere else in the banner cannot confuse us
           RELTOK=$(echo "$KR" | sed -n 's/^Linux version \([^ ]*\).*/\1/p')
           echo "release token: $RELTOK"
-          case "$RELTOK" in
-            6.6.118-android15-8*) ;;
-            *) echo "ERROR: release is not 6.6.118-android15-8"; exit 1 ;;
-          esac
-          case "$RELTOK" in
-            *"${{ inputs.KERNEL_LOCALVERSION }}") ;;
-            *) echo "ERROR: release does not end with the stock suffix"; exit 1 ;;
-          esac
+
+          # common/Makefile has EXTRAVERSION empty, so "-android15-8-..." must come from
+          # CONFIG_LOCALVERSION. Compare against the full expected string, built from the
+          # version numbers and the requested suffix, so a missing -android15-8 fails here
+          # instead of silently producing a kirin of wrong vermagic.
+          EXPECTED="6.6.118${{ inputs.KERNEL_LOCALVERSION }}"
+          echo "expected     : $EXPECTED"
+          if [ "$RELTOK" != "$EXPECTED" ]; then
+            echo "ERROR: release token does not match the stock string"
+            echo "  got      : $RELTOK"
+            echo "  expected : $EXPECTED"
+            echo "--- CONFIG_LOCALVERSION actually used ---"
+            grep -n '^CONFIG_LOCALVERSION' "$CFG" || echo "  (no CONFIG_LOCALVERSION in .config)"
+            echo "--- Makefile EXTRAVERSION ---"
+            grep -n '^EXTRAVERSION' workspace/kernel_platform/common/Makefile || true
+            exit 1
+          fi
           case "$RELTOK" in
             *+) echo "ERROR: dangling '+' in release token"; exit 1 ;;
           esac
-          echo "release string ok"
+          echo "release string ok (exact match)"
 
           echo "--- required symbols ---"
           grep -qE "^CONFIG_KSU=y"        "$CFG" || { echo "ERROR: CONFIG_KSU missing"; exit 1; }
