@@ -531,19 +531,28 @@ jobs:
           # boot has no ramdisk: split_boot + flash_boot instead of dump/write
           sed -i -E 's|^[[:space:]]*dump_boot;.*$|split_boot; # no ramdisk on boot|' "$AK"
           sed -i -E 's|^[[:space:]]*write_boot;.*$|flash_boot; # write kernel back|' "$AK"
-          # fallback: if the template used a different spelling, append the calls
+          # fallback if the template spelled the calls differently: the AnyKernel3
+          # template marks its boot section with "# boot install" / "## end boot install"
           if ! grep -qE '^[[:space:]]*split_boot;' "$AK"; then
-            sed -i '/^# install/i split_boot;' "$AK" 2>/dev/null || true
+            if grep -q '^# boot install' "$AK"; then
+              sed -i '/^# boot install/a split_boot;' "$AK"
+            elif grep -q '^# import functions' "$AK"; then
+              sed -i '/^# import functions/i split_boot;' "$AK"
+            fi
+          fi
+          if ! grep -qE '^[[:space:]]*flash_boot;' "$AK"; then
+            if grep -q '^## end boot install' "$AK"; then
+              sed -i '/^## end boot install/i flash_boot;' "$AK"
+            fi
           fi
           if ! grep -qE '^[[:space:]]*split_boot;' "$AK"; then
             echo "ERROR: could not activate split_boot in anykernel.sh"
-            echo "--- template head ---"
-            sed -n '1,60p' "$AK"
+            sed -n '1,70p' "$AK"
             exit 1
           fi
           if ! grep -qE '^[[:space:]]*flash_boot;' "$AK"; then
             echo "ERROR: could not activate flash_boot in anykernel.sh"
-            sed -n '1,60p' "$AK"
+            sed -n '1,70p' "$AK"
             exit 1
           fi
           # the template ships Galaxy Nexus (tuna) tweaks that would corrupt the ramdisk
