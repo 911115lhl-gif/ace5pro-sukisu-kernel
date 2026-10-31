@@ -146,22 +146,39 @@ jobs:
 
       - name: apply_sukisu
         run: |
-          # SukiSU-Ultra's `builtin` branch ships the SUSFS glue in-tree
-          # (kernel/Kconfig defines KSU, KPM, KSU_SUSFS and every KSU_SUSFS_*), while
-          # `main` has no KSU_SUSFS at all. So we need the builtin branch and we must
-          # NOT apply 10_enable_susfs_for_ksu.patch (it targets upstream KernelSU and
-          # corrupts SukiSU's refactored sources -> ksu_late_loaded / ksu_lsm_hook_*).
+          # The two SukiSU-Ultra lines are not interchangeable:
+          #   builtin : Kconfig defines KSU + KPM + KSU_SUSFS and the sources call the
+          #             susfs_* helpers unconditionally (manager/pkg_observer.c calls
+          #             susfs_parse_priority_app_strings()), so it only compiles with
+          #             SUSFS on. This is the branch that gives us SUSFS.
+          #   main    : no KSU_SUSFS anywhere, but KSU and KPM work standalone. Used
+          #             for the "does a pure GKI + KSU kernel even boot" test.
+          # Pick the branch to match what the run actually asked for.
           #
-          # IMPORTANT: kernel/setup.sh itself clones SukiSU into msm-kernel/KernelSU and
-          # then force-checkouts `main` + the newest tag, which would silently throw our
-          # branch away. We therefore do the integration manually and only borrow the
-          # Makefile/Kconfig wiring logic from setup.sh.
-          SUKISU_REF="builtin"
+          # Note: kernel/setup.sh force-checkouts main + the newest tag, throwing our
+          # branch away, so the integration below is done manually.
+          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
+            SUKISU_REF="builtin"
+          else
+            SUKISU_REF="main"
+          fi
+          echo "SukiSU branch: $SUKISU_REF (ENABLE_SUSFS=${{ inputs.ENABLE_SUSFS }})"
           git clone --depth=1 -b "$SUKISU_REF" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu \
             || { echo "ERROR: clone $SUKISU_REF failed"; exit 1; }
-          echo "--- confirm the branch really provides the SUSFS symbols ---"
-          grep -n "config KSU_SUSFS$" /tmp/sukisu/kernel/Kconfig || { echo "ERROR: $SUKISU_REF lacks KSU_SUSFS"; exit 1; }
-          grep -n "config KPM$"         /tmp/sukisu/kernel/Kconfig || { echo "ERROR: $SUKISU_REF lacks KPM"; exit 1; }
+          echo "--- branch contents ---"
+          grep -n "config KSU$"   /tmp/sukisu/kernel/Kconfig || { echo "ERROR: $SUKISU_REF lacks KSU"; exit 1; }
+          grep -n "config KPM$"   /tmp/sukisu/kernel/Kconfig || { echo "ERROR: $SUKISU_REF lacks KPM"; exit 1; }
+          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
+            grep -n "config KSU_SUSFS$" /tmp/sukisu/kernel/Kconfig \
+              || { echo "ERROR: $SUKISU_REF lacks KSU_SUSFS but SUSFS was requested"; exit 1; }
+            echo "  KSU + KPM + KSU_SUSFS present"
+          else
+            if grep -q "config KSU_SUSFS$" /tmp/sukisu/kernel/Kconfig; then
+              echo "ERROR: $SUKISU_REF unexpectedly defines KSU_SUSFS; pick the other branch"
+              exit 1
+            fi
+            echo "  KSU + KPM present, no KSU_SUSFS (SUSFS disabled for this run)"
+          fi
 
           cd workspace/kernel_platform/msm-kernel
           echo "=== install SukiSU into drivers/kernelsu (no re-clone, no branch switching) ==="
@@ -171,7 +188,6 @@ jobs:
           echo "--- installed tree ---"
           ls drivers/kernelsu | head
           test -f drivers/kernelsu/Kconfig || { echo "ERROR: drivers/kernelsu/Kconfig missing"; exit 1; }
-          grep -c "config KSU_SUSFS" drivers/kernelsu/Kconfig || true
 
           echo "=== wire it into the kernel build ==="
           grep -q "obj-\$(CONFIG_KSU)" drivers/Makefile \
