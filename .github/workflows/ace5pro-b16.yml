@@ -781,10 +781,13 @@ jobs:
           kmagic = struct.unpack_from('<I', b, 4096 + 0x38)[0]
           assert kmagic == 0x644D5241, 'kernel magic wrong'
           print('  kernel magic  : 0x%08X (ARM64)' % kmagic)
-          i = b.find(b'Linux version ', 4096, 4096 + 200000)
-          rel = b[i:i+130].split(b'\0')[0].decode('latin1') if i > 0 else '(not found)'
-          print('  release       : %s' % rel)
-          assert b'runner@' in rel or b'runner' in rel, 'boot.img does not carry our build'
+          # the banner can sit anywhere in the image, so search the whole payload
+          i = b.find(b'Linux version ', 4096)
+          rel = b[i:i+130].split(b'\0')[0].decode('latin1', 'replace') if i > 0 else ''
+          print('  release       : %s' % (rel or '(not found)'))
+          assert rel, 'Linux version banner not found in boot.img'
+          # our build is identifiable by the CI builder account in the banner
+          assert 'runner@' in rel, 'boot.img does not carry our CI build: %s' % rel
           print('  OK: boot.img matches the stock v4 layout and carries our kernel')
           PYEOF
           echo "--- boot.img header check ---"
