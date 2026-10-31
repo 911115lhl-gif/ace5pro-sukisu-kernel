@@ -300,21 +300,37 @@ jobs:
 
       - name: set_release_string
         run: |
-          # scripts/setlocalversion appends an scm tail ("-g<commit>"), but the stock
-          # banner has none, so the expansion has to be removed from the final echo.
-          # Only the *expansion* is dropped: the scm_version() helper itself stays.
+          # scripts/setlocalversion ends with a line that concatenates
+          #   ${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}
+          # and the stock banner carries no scm tail, so ${scm_version} has to go from
+          # THAT line only. The scm_version() helper and its other call sites must stay,
+          # so all checks below look at the last "echo ${KERNELVERSION}" line alone.
           KDIR="workspace/kernel_platform/common"
           SL="$KDIR/scripts/setlocalversion"
           test -f "$SL" || { echo "ERROR: $SL missing"; exit 1; }
-          echo "--- original final echo ---"
-          grep -n 'echo "${KERNELVERSION}' "$SL" || { echo "ERROR: final echo not found"; exit 1; }
-          sed -i 's/\${scm_version}//g' "$SL"
-          echo "--- patched final echo ---"
-          grep -n 'echo "${KERNELVERSION}' "$SL"
-          if grep -q 'echo "${KERNELVERSION}.*scm_version' "$SL"; then
-            echo "ERROR: scm_version still expanded in the final echo"
+
+          echo "--- all echo KERNELVERSION lines (before) ---"
+          grep -n 'echo "${KERNELVERSION}' "$SL" || { echo "ERROR: no echo KERNELVERSION"; exit 1; }
+
+          # the release line is the LAST such line; take its number
+          FINAL_LINE=$(grep -n 'echo "${KERNELVERSION}' "$SL" | tail -1 | cut -d: -f1)
+          echo "final release line = $FINAL_LINE"
+          test -n "$FINAL_LINE" || { echo "ERROR: could not locate the final echo"; exit 1; }
+          echo "before: $(sed -n "${FINAL_LINE}p" "$SL")"
+
+          # drop only the ${scm_version} expansion, and only on that line
+          sed -i "${FINAL_LINE}s/\\\${scm_version}//g" "$SL"
+          echo "after : $(sed -n "${FINAL_LINE}p" "$SL")"
+
+          # verify against that single line, not the whole file
+          if sed -n "${FINAL_LINE}p" "$SL" | grep -q 'scm_version'; then
+            echo "ERROR: scm_version still expanded on the final release line"
             exit 1
           fi
+          # and make sure we did not damage the helper definition
+          grep -q '^scm_version()' "$SL" || { echo "ERROR: scm_version() helper lost"; exit 1; }
+          echo "final release line is clean, scm_version() helper intact"
+
           echo "--- CONFIG_LOCALVERSION in defconfig ---"
           grep -n "CONFIG_LOCALVERSION" "$KDIR/arch/arm64/configs/gki_defconfig" || true
 
