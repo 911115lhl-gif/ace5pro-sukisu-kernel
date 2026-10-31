@@ -178,30 +178,52 @@ jobs:
           cd kernel_platform/common
           P50="50_add_susfs_in_gki-${ANDROID_VERSION}-${KVERSION}.patch"
 
-          # Ace 5 Pro needs the same two fixups the reference flow applies: the hunk
-          # header in the upstream patch does not match this tree, and the
-          # trace/hooks/fs.h include does not exist here.
-          echo "=== adjust the patch for this device ==="
-          sed -i 's/-32,12 +32,38/-32,11 +32,37/g' "$P50"
-          sed -i '/#include <trace\/hooks\/fs.h>/d' "$P50"
+          # Apply the patch exactly as shipped. An earlier attempt tried to delete the
+          # "#include <trace/hooks/fs.h>" context line (copied from a different device's
+          # flow), but this tree DOES have include/trace/hooks/fs.h, and dropping a
+          # context line desynchronises the hunk counts so patch aborts with
+          #   "malformed patch at line 662"
+          # So: verify the header really exists, then leave the patch untouched.
+          echo "=== sanity check: does this tree provide trace/hooks/fs.h? ==="
+          test -f include/trace/hooks/fs.h \
+            && echo "  include/trace/hooks/fs.h present -> patch needs no edit" \
+            || echo "  WARN: include/trace/hooks/fs.h missing; patch may fail at fs/namespace.c"
 
           echo "=== apply 69_hide_stuff.patch ==="
           patch -p1 -F 3 < 69_hide_stuff.patch || { echo "ERROR: 69_hide_stuff failed"; exit 1; }
 
           echo "=== apply 50_add_susfs_in_kernel ==="
-          patch -p1 < "$P50" || echo "WARN: 50_add_susfs had rejects (continuing, will verify)"
+          # dry-run first so a half-applied patch cannot leave the tree dirty
+          if ! patch -p1 --dry-run -F 3 < "$P50" > /tmp/p50_dry.log 2>&1; then
+            echo "ERROR: 50_add_susfs dry-run failed"
+            tail -30 /tmp/p50_dry.log
+            exit 1
+          fi
+          echo "  dry-run ok"
+          patch -p1 -F 3 < "$P50" || {
+            echo "ERROR: 50_add_susfs failed on the real apply"
+            find . -name '*.rej' -exec sh -c 'echo "### $1"; cat "$1"' _ {} \; 2>/dev/null | head -60
+            exit 1
+          }
+          echo "  50_add_susfs applied cleanly"
 
           echo "=== apply manual hooks ==="
           cp -v ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
-          patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch \
-            || echo "WARN: manual hooks patch had rejects"
+          if ! patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch; then
+            echo "WARN: manual hooks patch had rejects (kprobe hooking will be used instead)"
+            find . -name '*.rej' 2>/dev/null | head -10
+          else
+            echo "  manual hooks applied cleanly"
+          fi
 
           echo "=== verify wiring ==="
           grep -q "susfs" fs/namei.c      || { echo "ERROR: fs/namei.c has no susfs hook"; exit 1; }
           grep -q "susfs" fs/namespace.c  || { echo "ERROR: fs/namespace.c has no susfs hook"; exit 1; }
           grep -qE "CONFIG_KSU_SUSFS" fs/Makefile \
             || { echo "ERROR: fs/Makefile lacks the susfs.o rule"; exit 1; }
-          echo "  OK: namei.c / namespace.c / fs/Makefile wired"
+          test -f include/linux/susfs.h     || { echo "ERROR: include/linux/susfs.h missing"; exit 1; }
+          test -f include/linux/susfs_def.h || { echo "ERROR: include/linux/susfs_def.h missing"; exit 1; }
+          echo "  OK: namei.c / namespace.c / fs/Makefile / headers wired"
           echo "susfs integrated ok"
 
       - name: write_kernel_config
