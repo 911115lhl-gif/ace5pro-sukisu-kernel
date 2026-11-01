@@ -158,10 +158,22 @@ jobs:
           test -d "$DRIVER_DIR" || { echo "ERROR: $DRIVER_DIR not found"; ls -d */drivers 2>/dev/null; exit 1; }
           echo "=== installing into $DRIVER_DIR (the GKI tree) ==="
           rm -f "$DRIVER_DIR/kernelsu"
-          ln -sf ../KernelSU/kernel "$DRIVER_DIR/kernelsu"
+          # The symlink lives in common/drivers, so "../KernelSU/kernel" would resolve to
+          # common/KernelSU/kernel, which does not exist. Compute the relative path
+          # instead of hand-writing it (this is what setup.sh does too).
+          KSU_ABS=$(cd KernelSU/kernel && pwd -P)
+          REL=$(realpath --relative-to="$(cd "$DRIVER_DIR" && pwd -P)" "$KSU_ABS")
+          echo "target: $KSU_ABS"
+          echo "relative from $DRIVER_DIR: $REL"
+          ln -sfn "$REL" "$DRIVER_DIR/kernelsu"
           ls -la "$DRIVER_DIR/kernelsu"
           KSUDIR="$DRIVER_DIR/kernelsu"
-          test -f "$KSUDIR/Kconfig" || { echo "ERROR: $KSUDIR/Kconfig missing"; exit 1; }
+          test -f "$KSUDIR/Kconfig" || {
+            echo "ERROR: $KSUDIR/Kconfig not reachable"
+            echo "link target resolves to: $(readlink -f "$DRIVER_DIR/kernelsu" 2>/dev/null || echo '<broken>')"
+            ls "$KSU_ABS" | head
+            exit 1
+          }
           echo "KSUDIR=$KSUDIR" >> "$GITHUB_ENV"
 
           echo "--- Kconfig symbols ---"
