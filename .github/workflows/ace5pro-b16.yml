@@ -188,14 +188,33 @@ jobs:
           echo "--- wire into the build ---"
           grep -q 'obj-$(CONFIG_KSU)' "$DRIVER_DIR/Makefile" \
             || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVER_DIR/Makefile"
-          grep -q 'source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig" \
-            || sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
+          # Insert the source line immediately before the FIRST top-level "endmenu".
+          # awk is used because "sed 0,/re/" is GNU-only and the naive s/// would rewrite
+          # every endmenu in the file.
+          if ! grep -q 'source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"; then
+            awk 'BEGIN{done=0} { if (!done && $0=="endmenu") { print "source \"drivers/kernelsu/Kconfig\""; done=1 } print }' \
+              "$DRIVER_DIR/Kconfig" > "$DRIVER_DIR/Kconfig.new" \
+              && mv "$DRIVER_DIR/Kconfig.new" "$DRIVER_DIR/Kconfig"
+          fi
           tail -3 "$DRIVER_DIR/Makefile"
-          grep -n 'kernelsu/Kconfig' "$DRIVER_DIR/Kconfig" || { echo "ERROR: Kconfig not wired"; exit 1; }
+          grep -n 'kernelsu/Kconfig' "$DRIVER_DIR/Kconfig" || {
+            echo "ERROR: Kconfig not wired"; tail -10 "$DRIVER_DIR/Kconfig"; exit 1; }
 
-          KSU_VERSION=$(expr $(git -C KernelSU rev-list --count HEAD 2>/dev/null || echo 13000) + 37185)
+          # This is a --depth=1 clone, so "git rev-list --count HEAD" is always 1 and would
+          # produce a bogus KSU version. SukiSU computes
+          #   KSU_VERSION = VERSION_BASE(40000) + commit_count - VERSION_OFFSET(2815)
+          # i.e. commit_count + 37185, so take the branch commit count from the GitHub
+          # API Link header (last page number == number of commits).
+          KSU_COMMITS=$(curl -sI "https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/commits?sha=${BR}&per_page=1" \
+            | grep -i '^link:' | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p' | tr -d '\r')
+          if [ -n "$KSU_COMMITS" ]; then
+            KSU_VERSION=$(expr "$KSU_COMMITS" + 37185)
+          else
+            KSU_VERSION=41120
+          fi
+          echo "KSU_COMMITS=$KSU_COMMITS"
+          echo "KSU_VERSION=$KSU_VERSION"
           echo "KSU_VERSION=$KSU_VERSION" >> "$GITHUB_ENV"
-          echo "KernelSU integration version: $KSU_VERSION"
 
       - name: setup_susfs
         if: ${{ inputs.ENABLE_SUSFS == true }}
