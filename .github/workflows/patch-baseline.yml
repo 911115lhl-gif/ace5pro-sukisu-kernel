@@ -77,11 +77,17 @@ jobs:
           cp Image Image.before
           sha_before=$(sha256sum Image.before | awk '{print $1}')
           echo "before sha: $sha_before"
+          rm -f oImage
           set +e
           ./patch_linux 2>&1 | tail -40
           rc=${PIPESTATUS[0]}
           set -e
           echo "patch_linux exit=$rc"
+          if [ "$rc" != "0" ]; then
+            echo "ERROR: patch_linux failed with exit $rc"
+            ls -la /tmp | head -20
+            exit 1
+          fi
           if [ ! -s oImage ]; then
             echo "ERROR: patch_linux produced no oImage"
             ls -la /tmp | head -20
@@ -91,14 +97,19 @@ jobs:
           sha_after=$(sha256sum oImage | awk '{print $1}')
           echo "after sha:  $sha_after"
           [ "$sha_before" != "$sha_after" ] || { echo "ERROR: oImage identical to input, patch did nothing"; exit 1; }
+          # the patch appends kpimg to the image, so oImage must be larger
+          SIZE_B=$(stat -c%s Image.before)
+          SIZE_A=$(stat -c%s oImage)
+          echo "size before=$SIZE_B after=$SIZE_A"
+          [ "$SIZE_A" -gt "$SIZE_B" ] || { echo "ERROR: oImage did not grow, kpimg was not appended"; exit 1; }
           MG=$(od -An -tx1 -j56 -N4 oImage | tr -d ' \n')
           echo "oImage magic@0x38: $MG"
           [ "$MG" = "41524d64" ] || { echo "ERROR: oImage is not a valid arm64 Image"; exit 1; }
           echo "--- banner after patch ---"
           strings -n 12 oImage | grep -m1 '^Linux version ' || true
           echo "--- symbols after patch ---"
-          for s in ksu_ kpm_ kpimg; do
-            printf '  %-8s %s\n' "$s" "$(strings -n 6 oImage | grep -c "$s" || true)"
+          for s in ksu_ kpm_ kpimg KPATCH; do
+            printf '  %-10s %s\n' "$s" "$(strings -n 6 oImage | grep -c "$s" || true)"
           done
 
       - name: build_boot_img
