@@ -1,0 +1,158 @@
+name: patch-baseline
+
+# Applies SuKiSU's KernelPatch binary pass to the KNOWN-BOOTING kernel that was
+# dumped from the device, instead of recompiling from source.
+#
+# Why: rebuilding from source kept producing images that could not boot (wrong
+# kernel tree, vendor module conflicts, vermagic/SCM mismatch, ...). The dumped
+# kernel already boots and already contains KernelSU (362 ksu_ symbols) and the
+# KPM skeleton (9 kpm_ symbols), it only lacks the KernelPatch core that enables
+# KPM. patch_linux injects exactly that, without touching any config.
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_LOCALVERSION:
+        description: "expected release suffix (sanity check only)"
+        required: true
+        default: "-android15-8-g93e223c276e7-abogki500782043-4k"
+      DRY_RUN:
+        description: "only fetch/inspect, do not patch"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: patch-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: fetch_baseline
+        run: |
+          set -e
+          test -f baseline/baseline_Image.gz || { echo "ERROR: baseline/baseline_Image.gz missing"; ls -la baseline 2>/dev/null; exit 1; }
+          ls -l baseline/
+          gunzip -c baseline/baseline_Image.gz > /tmp/Image
+          test -s /tmp/Image || { echo "ERROR: decompress failed"; exit 1; }
+          KSIZE=$(stat -c%s /tmp/Image)
+          echo "kernel size: $KSIZE"
+          MAGIC=$(od -An -tx1 -j56 -N4 /tmp/Image | tr -d ' \n')
+          echo "magic@0x38: $MAGIC"
+          [ "$MAGIC" = "41524d64" ] || { echo "ERROR: not an arm64 Image"; exit 1; }
+          echo "--- banner ---"
+          strings -n 12 /tmp/Image | grep -m1 '^Linux version '
+          REL=$(strings -n 12 /tmp/Image | grep -m1 '^Linux version ' | sed -n 's/^Linux version \([^ ]*\).*/\1/p')
+          echo "release token: $REL"
+          [ "$REL" = "6.6.118${{ inputs.KERNEL_LOCALVERSION }}" ] || {
+            echo "ERROR: release token mismatch (expected 6.6.118${{ inputs.KERNEL_LOCALVERSION }})"
+            exit 1
+          }
+          echo "--- existing symbols ---"
+          for s in ksu_ kpm_ susfs_ kpimg; do
+            printf '  %-8s %s\n' "$s" "$(strings -n 6 /tmp/Image | grep -c "$s" || true)"
+          done
+
+      - name: download_patch_linux
+        run: |
+          set -e
+          curl -fL -o /tmp/patch_linux \
+            https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/latest/download/patch_linux \
+            || { echo "ERROR: download failed"; exit 1; }
+          chmod +x /tmp/patch_linux
+          ls -l /tmp/patch_linux
+          file /tmp/patch_linux || true
+
+      - name: run_patch
+        if: ${{ !inputs.DRY_RUN }}
+        run: |
+          set -e
+          cd /tmp
+          cp Image Image.before
+          sha_before=$(sha256sum Image.before | awk '{print $1}')
+          echo "before sha: $sha_before"
+          set +e
+          ./patch_linux 2>&1 | tail -40
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "patch_linux exit=$rc"
+          if [ ! -s oImage ]; then
+            echo "ERROR: patch_linux produced no oImage"
+            ls -la /tmp | head -20
+            exit 1
+          fi
+          echo "oImage size: $(stat -c%s oImage)"
+          sha_after=$(sha256sum oImage | awk '{print $1}')
+          echo "after sha:  $sha_after"
+          [ "$sha_before" != "$sha_after" ] || { echo "ERROR: oImage identical to input, patch did nothing"; exit 1; }
+          MG=$(od -An -tx1 -j56 -N4 oImage | tr -d ' \n')
+          echo "oImage magic@0x38: $MG"
+          [ "$MG" = "41524d64" ] || { echo "ERROR: oImage is not a valid arm64 Image"; exit 1; }
+          echo "--- banner after patch ---"
+          strings -n 12 oImage | grep -m1 '^Linux version ' || true
+          echo "--- symbols after patch ---"
+          for s in ksu_ kpm_ kpimg; do
+            printf '  %-8s %s\n' "$s" "$(strings -n 6 oImage | grep -c "$s" || true)"
+          done
+
+      - name: build_boot_img
+        if: ${{ !inputs.DRY_RUN }}
+        run: |
+          set -e
+          cd /tmp
+          test -s oImage || { echo "ERROR: oImage missing"; exit 1; }
+          KSIZE=$(stat -c%s oImage)
+          echo "patched kernel size: $KSIZE"
+          rm -f boot_hdr.bin boot_pad.bin boot_patched.img
+          dd if=/dev/zero of=boot_hdr.bin bs=1 count=1584 status=none
+          printf 'ANDROID!' | dd of=boot_hdr.bin bs=1 seek=0 conv=notrunc status=none
+          echo_u32le() {
+            v=$1; o=$2; fl=$3
+            b0=$(( v & 255 )); b1=$(( (v >> 8) & 255 ))
+            b2=$(( (v >> 16) & 255 )); b3=$(( (v >> 24) & 255 ))
+            o0=$(printf '%03o' "$b0"); o1=$(printf '%03o' "$b1")
+            o2=$(printf '%03o' "$b2"); o3=$(printf '%03o' "$b3")
+            printf "\\$o0\\$o1\\$o2\\$o3" | dd of="$fl" bs=1 seek="$o" conv=notrunc status=none
+          }
+          echo_u32le "$KSIZE" 8  boot_hdr.bin
+          echo_u32le 0       12  boot_hdr.bin
+          echo_u32le 0       16  boot_hdr.bin
+          echo_u32le 1584    20  boot_hdr.bin
+          echo_u32le 4       40  boot_hdr.bin
+          echo_u32le 0       1580 boot_hdr.bin
+          dd if=/dev/zero of=boot_pad.bin bs=1 count=2512 status=none
+          cat boot_hdr.bin boot_pad.bin oImage > boot_patched.img
+          echo "--- boot.img check ---"
+          SZ=$(stat -c%s boot_patched.img)
+          echo "  size: $SZ (expected $((4096 + KSIZE)))"
+          [ "$SZ" = "$((4096 + KSIZE))" ] || { echo "ERROR: size mismatch"; exit 1; }
+          echo "  magic: $(dd if=boot_patched.img bs=1 count=8 status=none)"
+          rks=$(od -An -tu4 -j8   -N4 boot_patched.img | tr -d ' ')
+          rhs=$(od -An -tu4 -j20  -N4 boot_patched.img | tr -d ' ')
+          rhv=$(od -An -tu4 -j40  -N4 boot_patched.img | tr -d ' ')
+          rsig=$(od -An -tu4 -j1580 -N4 boot_patched.img | tr -d ' ')
+          echo "  kernel_size   : $rks"
+          echo "  header_size   : $rhs"
+          echo "  header_version: $rhv"
+          echo "  signature_size: $rsig"
+          [ "$rks" = "$KSIZE" ] || { echo "ERROR: kernel_size"; exit 1; }
+          [ "$rhs" = "1584" ] || { echo "ERROR: header_size"; exit 1; }
+          [ "$rhv" = "4" ] || { echo "ERROR: header_version"; exit 1; }
+          [ "$rsig" = "0" ] || { echo "ERROR: signature_size"; exit 1; }
+          mkdir -p /tmp/artifact
+          cp boot_patched.img "/tmp/artifact/boot_patched_${{ github.sha }}.img"
+          ls -l /tmp/artifact
+
+      - name: upload
+        if: ${{ !inputs.DRY_RUN }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-patched-${{ github.sha }}
+          path: /tmp/artifact/*.img
+          if-no-files-found: error
