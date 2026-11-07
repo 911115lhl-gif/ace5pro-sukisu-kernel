@@ -456,13 +456,19 @@ jobs:
             ls -la "$CLANG_DIR/bin" | head -30
             exit 1
           }
-          export PATH="$CLANG_DIR/bin:$PATH"
+          # PATH order matters: whatever comes FIRST wins. Put the ZyC toolchain in
+          # front of everything else so neither prebuilts/build-tools nor ccache can
+          # shadow its clang/ld.lld. Ccache still works because CC="ccache clang" is
+          # passed explicitly on the make line, which resolves clang through PATH.
           export PATH="/usr/lib/ccache:$PATH"
           for tb in prebuilts/build-tools/path/linux-x86 prebuilts/kernel-build-tools/path/linux-x86; do
             [ -d "$PWD/$tb" ] && export PATH="$PWD/$tb:$PATH"
           done
+          # ZyC last -> therefore first in effective precedence
+          export PATH="$CLANG_DIR/bin:$PATH"
           echo "--- toolchain in use ---"
           which clang
+          which ld.lld
           clang --version | head -3
           ld.lld --version | head -1
           # fail loudly if we somehow got the AOSP clang instead of ZyC 19
@@ -471,6 +477,17 @@ jobs:
             clang --version | head -1
             exit 1
           }
+          # the stock kernel's compiler carries this exact llvm-project commit
+          clang --version | head -1 | grep -q 'b5f23e56902ec37c6ac1c13f21ba5d863d66b3de' || {
+            echo "WARN: llvm-project commit differs from stock (expected b5f23e56...)"
+            clang --version | head -1
+          }
+          # make sure clang really resolves to the ZyC directory, not a prebuilt
+          case "$(which clang)" in
+            "$CLANG_DIR"/*) echo "clang resolves inside ZyC toolchain: OK" ;;
+            *) echo "ERROR: clang is $(which clang), expected it under $CLANG_DIR"
+               exit 1 ;;
+          esac
 
           # build timestamp must not change the vermagic, but a fixed epoch keeps the
           # banner stable between runs
@@ -504,7 +521,21 @@ jobs:
           test -s "$IMG" || { echo "ERROR: Image not produced"; ls -la out/arch/arm64/boot/ 2>/dev/null; exit 1; }
           echo "Image: $IMG ($(stat -c%s "$IMG") bytes)"
           echo "--- release string ---"
-          strings -n 12 "$IMG" | grep -m1 '^Linux version ' || true
+          BANNER=$(strings -n 12 "$IMG" | grep -m1 '^Linux version ')
+          echo "$BANNER"
+          # This is the whole point of this step: the banner must name the ZyC clang 19
+          # toolchain (identical to stock), not the AOSP clang 18 that ships in the tree.
+          if echo "$BANNER" | grep -q 'ZyC clang version 19'; then
+            echo "TOOLCHAIN OK: image was built by ZyC clang 19"
+          elif echo "$BANNER" | grep -q 'Android.*clang version 18'; then
+            echo "ERROR: image was built by AOSP clang 18, not ZyC clang 19"
+            echo "  the PATH fix did not take effect; refusing to ship this image"
+            exit 1
+          else
+            echo "ERROR: banner does not name a recognisable toolchain"
+            echo "  banner: $BANNER"
+            exit 1
+          fi
 
       - name: verify_gki_config
         if: ${{ !inputs.DRY_RUN }}
