@@ -134,22 +134,16 @@ jobs:
       - name: setup_sukisu
         run: |
           cd workspace/kernel_platform
-          # CONFIG_KSU_SUSFS is declared in SukiSU's own kernel/Kconfig, and only the
-          # `builtin` branch has it (main has no KSU_SUSFS symbol, so a
-          # CONFIG_KSU_SUSFS=y line is silently dropped by olddefconfig).
-          #
-          # The integration is done by hand instead of via kernel/setup.sh because that
-          # script runs `git checkout main` under some conditions and would throw the
-          # branch we asked for away.
-          if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ]; then
-            BR="builtin"
-          else
-            BR="main"
-          fi
-          echo "SukiSU branch: $BR"
+          # SukiSU-Ultra has been unmaintained and no longer compiles; the proven
+          # sm8750 flow (cctv18) redirects the "sukisu" choice to BakaSU, which is
+          # compatible with the SukiSU manager. BakaSU's kernel/Kconfig declares both
+          # CONFIG_KSU and CONFIG_KSU_SUSFS (plus the SUSFS sub-options), same layout
+          # as SukiSU-Ultra, so the wiring below is unchanged.
+          BR="main"
+          echo "BakaSU branch: $BR"
           rm -rf KernelSU
-          git clone --depth=1 -b "$BR" https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU \
-            || { echo "ERROR: clone SukiSU $BR failed"; exit 1; }
+          git clone --depth=1 -b "$BR" https://github.com/Baka-SU/BakaSU.git KernelSU \
+            || { echo "ERROR: clone BakaSU $BR failed"; exit 1; }
           echo "--- branch actually checked out ---"
           git -C KernelSU rev-parse --abbrev-ref HEAD || true
           git -C KernelSU log --oneline -1 || true
@@ -200,19 +194,15 @@ jobs:
           grep -n 'kernelsu/Kconfig' "$DRIVER_DIR/Kconfig" || {
             echo "ERROR: Kconfig not wired"; tail -10 "$DRIVER_DIR/Kconfig"; exit 1; }
 
-          # SukiSU's own kernel/Makefile computes the version as
-          #   KSU_VERSION = VERSION_BASE(40000) + LOCAL_COUNT - VERSION_OFFSET(2815)
-          # where LOCAL_COUNT is the commit count of REPO_BRANCH. IMPORTANT: both the
-          # builtin and main branches hardcode REPO_BRANCH := main, so the count must
-          # always come from *main*, never from the branch we cloned -- builtin has more
-          # commits (4677) than main (3939) and using its own count would fabricate an
-          # impossible version (41862 instead of 41124).
-          KSU_COMMITS=$(curl -sI "https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/commits?sha=main&per_page=1" \
+          # BakaSU version = main commit count + 30700 (same offset the proven
+          # cctv18 sm8750 flow uses). This is a --depth=1 clone, so count from the
+          # GitHub API instead of `git rev-list --count main` (always 1 here).
+          KSU_COMMITS=$(curl -sI "https://api.github.com/repos/Baka-SU/BakaSU/commits?sha=main&per_page=1" \
             | grep -i '^link:' | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p' | tr -d '\r')
           if [ -n "$KSU_COMMITS" ]; then
-            KSU_VERSION=$(expr "$KSU_COMMITS" + 37185)
+            KSU_VERSION=$(expr "$KSU_COMMITS" + 30700)
           else
-            KSU_VERSION=41124
+            KSU_VERSION=33700
           fi
           echo "main commit count = ${KSU_COMMITS:-unknown}"
           echo "KSU_VERSION=$KSU_VERSION  (the manager APK must be >= this)"
@@ -222,9 +212,13 @@ jobs:
         if: ${{ inputs.ENABLE_SUSFS == true }}
         run: |
           cd workspace
-          git clone --depth=1 -b "gki-${ANDROID_VERSION}-${KVERSION}" \
-            https://gitlab.com/simonpunk/susfs4ksu.git || {
-              echo "ERROR: clone susfs4ksu failed"; exit 1; }
+          # Use cctv18/susfs4oki (the OPLUS/OKI-adapted fork of susfs4ksu), NOT the
+          # upstream simonpunk/susfs4ksu gki branch. On OPLUS's modified kernel tree the
+          # upstream patch does not apply cleanly / produced unbootable images; the
+          # "oki-" fork is what the proven sm8750 flow uses.
+          git clone --depth=1 -b "oki-${ANDROID_VERSION}-${KVERSION}" \
+            https://github.com/cctv18/susfs4oki.git susfs4ksu || {
+              echo "ERROR: clone susfs4oki failed"; exit 1; }
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git \
             || { echo "ERROR: clone SukiSU_patch failed"; exit 1; }
           test -f "susfs4ksu/kernel_patches/50_add_susfs_in_gki-${ANDROID_VERSION}-${KVERSION}.patch" \
