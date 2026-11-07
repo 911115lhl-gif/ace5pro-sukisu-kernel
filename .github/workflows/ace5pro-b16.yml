@@ -430,20 +430,39 @@ jobs:
             || { echo "ERROR: could not download ZyC clang"; exit 1; }
           ls -l "$ZYC_TGZ"
           tar -xzf "$ZYC_TGZ" -C "$ZYC_DIR" || { echo "ERROR: tar failed"; exit 1; }
-          # the tarball may or may not carry a top-level directory
-          CLANG_DIR=$(dirname "$(dirname "$(find "$ZYC_DIR" -type f -name clang -path '*/bin/*' | head -1)")")
-          test -x "$CLANG_DIR/bin/clang" || {
+          # This tarball extracts FLAT: bin/, lib/, x86_64-pc-linux-gnu/, ... go
+          # straight into $ZYC_DIR with no top-level wrapper directory. Do not try to
+          # derive the prefix from `find -path '*/bin/*'` -- that also matches the
+          # cross-toolchain bin dirs (aarch64-linux-gnu/bin/ld) and yields the wrong
+          # prefix. Instead: check the flat layout first, then fall back to looking
+          # for a single wrapper directory.
+          if [ -x "$ZYC_DIR/bin/clang" ]; then
+            CLANG_DIR="$ZYC_DIR"
+          else
+            CLANG_DIR=$(find "$ZYC_DIR" -maxdepth 2 -type f -name clang -perm -u+x -printf '%h\n' 2>/dev/null | head -1)
+            [ -n "$CLANG_DIR" ] && CLANG_DIR=$(dirname "$CLANG_DIR")
+          fi
+          if [ -z "$CLANG_DIR" ] || [ ! -x "$CLANG_DIR/bin/clang" ]; then
             echo "ERROR: ZyC clang not found after extraction"
-            find "$ZYC_DIR" -maxdepth 3 -type d | head -20
+            echo "--- top level of $ZYC_DIR ---"
+            ls -la "$ZYC_DIR" | head -30
+            echo "--- any clang binaries ---"
+            find "$ZYC_DIR" -maxdepth 3 -type f -name 'clang*' | head -20
+            exit 1
+          fi
+          echo "zyc clang dir: $CLANG_DIR"
+          test -x "$CLANG_DIR/bin/ld.lld" || {
+            echo "ERROR: ld.lld missing in $CLANG_DIR/bin"
+            ls -la "$CLANG_DIR/bin" | head -30
             exit 1
           }
-          echo "zyc clang dir: $CLANG_DIR"
           export PATH="$CLANG_DIR/bin:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
           for tb in prebuilts/build-tools/path/linux-x86 prebuilts/kernel-build-tools/path/linux-x86; do
             [ -d "$PWD/$tb" ] && export PATH="$PWD/$tb:$PATH"
           done
           echo "--- toolchain in use ---"
+          which clang
           clang --version | head -3
           ld.lld --version | head -1
           # fail loudly if we somehow got the AOSP clang instead of ZyC 19
