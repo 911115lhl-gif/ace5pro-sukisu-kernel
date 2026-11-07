@@ -321,6 +321,21 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CFG"
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CFG"
           fi
+          # Match the stock build's LTO mode. sakfi/OP_KSUN_FS configs/a16/
+          # OP-ACE-5-PRO.json sets "lto": "thin" for this exact device, and the stock
+          # kernel is a thinlto build. Full LTO would change codegen substantially.
+          for lto in CONFIG_LTO CONFIG_LTO_CLANG CONFIG_LTO_CLANG_THIN CONFIG_LTO_CLANG_FULL CONFIG_LTO_NONE; do
+            sed -i "/^$lto[= ]/d" "$CFG"
+          done
+          {
+            echo "CONFIG_LTO=y"
+            echo "CONFIG_LTO_CLANG=y"
+            echo "CONFIG_LTO_CLANG_THIN=y"
+            echo "# CONFIG_LTO_CLANG_FULL is not set"
+            echo "# CONFIG_LTO_NONE is not set"
+          } >> "$CFG"
+          echo "--- LTO lines ---"
+          grep -n '^CONFIG_LTO' "$CFG" || true
           # The release string must stay byte-identical to stock or the untouched
           # vendor_dlkm modules refuse to load (vermagic mismatch).
           # gki_defconfig ships CONFIG_LOCALVERSION="-4k"; rewrite ONLY that exact
@@ -401,22 +416,42 @@ jobs:
         if: ${{ !inputs.DRY_RUN }}
         run: |
           cd workspace/kernel_platform
-          CLANG_DIR=prebuilts/clang/host/linux-x86/clang-r510928
-          if [ ! -x "$CLANG_DIR/bin/clang" ]; then
-            for d in prebuilts/clang/host/linux-x86/clang-*; do
-              if [ -x "$d/bin/clang" ] && [ -x "$d/bin/ld.lld" ]; then CLANG_DIR="$d"; break; fi
-            done
-          fi
-          echo "clang: $CLANG_DIR"
-          test -x "$CLANG_DIR/bin/clang" || { echo "ERROR: no usable clang prebuilt"; exit 1; }
-          RELCLANG=$(cd "$CLANG_DIR" && pwd -P)
-          export PATH="$RELCLANG/bin:$PATH"
+          # The stock kernel on this device was built with ZyC clang 19.0.0git, NOT
+          # with the AOSP clang-r510928 (clang 18) that ships in kernel_platform.
+          # Building with clang 18 produced images that never booted, so use the same
+          # toolchain the stock kernel used. See sakfi/OP_KSUN_FS configs/a16/
+          # OP-ACE-5-PRO.json which pins exactly this tarball.
+          ZYC_URL="https://github.com/ZyCromerZ/Clang/releases/download/19.0.0git-20240723-release/Clang-19.0.0git-20240723.tar.gz"
+          ZYC_TGZ=/tmp/zyc-clang.tar.gz
+          ZYC_DIR=/tmp/zyc-clang
+          echo "=== fetching ZyC clang 19 ($ZYC_URL) ==="
+          rm -rf "$ZYC_DIR"; mkdir -p "$ZYC_DIR"
+          curl -fL --retry 3 --retry-delay 5 -o "$ZYC_TGZ" "$ZYC_URL" \
+            || { echo "ERROR: could not download ZyC clang"; exit 1; }
+          ls -l "$ZYC_TGZ"
+          tar -xzf "$ZYC_TGZ" -C "$ZYC_DIR" || { echo "ERROR: tar failed"; exit 1; }
+          # the tarball may or may not carry a top-level directory
+          CLANG_DIR=$(dirname "$(dirname "$(find "$ZYC_DIR" -type f -name clang -path '*/bin/*' | head -1)")")
+          test -x "$CLANG_DIR/bin/clang" || {
+            echo "ERROR: ZyC clang not found after extraction"
+            find "$ZYC_DIR" -maxdepth 3 -type d | head -20
+            exit 1
+          }
+          echo "zyc clang dir: $CLANG_DIR"
+          export PATH="$CLANG_DIR/bin:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
           for tb in prebuilts/build-tools/path/linux-x86 prebuilts/kernel-build-tools/path/linux-x86; do
             [ -d "$PWD/$tb" ] && export PATH="$PWD/$tb:$PATH"
           done
-          clang --version | head -1
+          echo "--- toolchain in use ---"
+          clang --version | head -3
           ld.lld --version | head -1
+          # fail loudly if we somehow got the AOSP clang instead of ZyC 19
+          clang --version | head -1 | grep -q '19\.' || {
+            echo "ERROR: expected clang 19.x from ZyC, got:"
+            clang --version | head -1
+            exit 1
+          }
 
           # build timestamp must not change the vermagic, but a fixed epoch keeps the
           # banner stable between runs
